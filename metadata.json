@@ -1,0 +1,6 @@
+{
+  "name": "Hisab AI",
+  "description": "Offline-first double-entry accounting assistant with Room database, PDF invoices, and Gemini API copilot.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
