@@ -74,8 +74,8 @@ class GroqService {
         products: List<ProductEntity>,
         toolExecutor: suspend (String, Map<String, Any>) -> String
     ): String = withContext(Dispatchers.IO) {
-        val strategy = getActiveStrategy()
-        Log.d("GroqService", "Active chat strategy: $strategy")
+        val preferredStrategy = getActiveStrategy()
+        Log.d("GroqService", "Preferred chat strategy: $preferredStrategy")
 
         val systemInstructionText = """
             You are Hisab Assistant, an AI accounting helper for a Pakistani ceramic distributor.
@@ -227,42 +227,65 @@ class GroqService {
             })
         }
 
-        if (strategy == "GEMINI_DIRECT") {
+        // Determine list of strategies to try in order
+        val strategiesToTry = mutableListOf<String>()
+        strategiesToTry.add(preferredStrategy)
+
+        if (preferredStrategy == "SUPABASE_PROXY") {
+            val hasGroq = try {
+                BuildConfig.GROQ_API_KEY.isNotEmpty() && BuildConfig.GROQ_API_KEY != "MY_GROQ_API_KEY"
+            } catch (e: Throwable) { false }
+            if (hasGroq) {
+                strategiesToTry.add("GROQ_DIRECT")
+            }
+            strategiesToTry.add("GEMINI_DIRECT")
+        } else if (preferredStrategy == "GROQ_DIRECT") {
+            strategiesToTry.add("GEMINI_DIRECT")
+        }
+
+        var lastError = ""
+        for (strategy in strategiesToTry) {
+            Log.d("GroqService", "Trying chat strategy: $strategy")
             try {
-                return@withContext callGeminiWithTools(systemInstructionText, history, userInput, toolsArray, toolExecutor)
+                if (strategy == "GEMINI_DIRECT") {
+                    val res = callGeminiWithTools(systemInstructionText, history, userInput, toolsArray, toolExecutor)
+                    if (!res.startsWith("Gemini API error") && !res.startsWith("Error:")) {
+                        return@withContext res
+                    }
+                    lastError = res
+                    Log.w("GroqService", "Gemini chat strategy returned error: $res")
+                } else {
+                    val messagesArray = JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("role", "system")
+                            put("content", systemInstructionText)
+                        })
+                        for (turn in history) {
+                            put(JSONObject().apply {
+                                put("role", if (turn.second) "user" else "assistant")
+                                put("content", turn.first)
+                            })
+                        }
+                        put(JSONObject().apply {
+                            put("role", "user")
+                            put("content", userInput)
+                        })
+                    }
+
+                    val res = makeGroqApiRequestWithTools(chatModelName, messagesArray, toolsArray, toolExecutor, chatModelFallback, forcedStrategy = strategy)
+                    if (!res.startsWith("Error calling Groq Assistant:") && !res.contains("Requested function was not found")) {
+                        return@withContext res
+                    }
+                    lastError = res
+                    Log.w("GroqService", "Groq chat strategy $strategy returned error: $res")
+                }
             } catch (e: Exception) {
-                Log.e("GroqService", "Gemini call failed, trying direct Groq fallback if configured", e)
+                lastError = e.localizedMessage ?: "Unknown exception"
+                Log.e("GroqService", "Strategy $strategy failed with exception", e)
             }
         }
 
-        // Call Groq endpoint
-        try {
-            val messagesArray = JSONArray()
-            
-            messagesArray.put(JSONObject().apply {
-                put("role", "system")
-                put("content", systemInstructionText)
-            })
-
-            // Add history
-            for (turn in history) {
-                messagesArray.put(JSONObject().apply {
-                    put("role", if (turn.second) "user" else "assistant")
-                    put("content", turn.first)
-                })
-            }
-
-            // Add current input
-            messagesArray.put(JSONObject().apply {
-                put("role", "user")
-                put("content", userInput)
-            })
-
-            return@withContext makeGroqApiRequestWithTools(chatModelName, messagesArray, toolsArray, toolExecutor, chatModelFallback)
-        } catch (e: Exception) {
-            Log.e("GroqService", "Exception in getChatResponse", e)
-            "A technical error occurred while contacting Groq Hisab AI assistant: ${e.localizedMessage}"
-        }
+        "Could not get a response from any AI service. Please make sure your API Keys are configured correctly or try again. Last error: $lastError"
     }
 
     private suspend fun makeGroqApiRequestWithTools(
@@ -270,9 +293,10 @@ class GroqService {
         messages: JSONArray,
         tools: JSONArray,
         toolExecutor: suspend (String, Map<String, Any>) -> String,
-        fallbackModel: String? = null
+        fallbackModel: String? = null,
+        forcedStrategy: String? = null
     ): String = withContext(Dispatchers.IO) {
-        val strategy = getActiveStrategy()
+        val strategy = forcedStrategy ?: getActiveStrategy()
         val url = if (strategy == "SUPABASE_PROXY") {
             "$supabaseUrl/functions/v1/groq-chat"
         } else {
@@ -380,15 +404,20 @@ class GroqService {
             } else {
                 Log.e("GroqService", "API Error: ${response.code} $resBody")
                 if (fallbackModel != null && (response.code == 404 || response.code == 400) && model != fallbackModel) {
-                    return@withContext makeGroqApiRequestWithTools(fallbackModel, messages, tools, toolExecutor, null)
+                    return@withContext makeGroqApiRequestWithTools(fallbackModel, messages, tools, toolExecutor, null, forcedStrategy)
                 }
                 return@withContext "Error calling Groq Assistant: (HTTP ${response.code}) $resBody"
             }
         }
     }
 
-    private fun makeGroqApiRequest(model: String, messages: JSONArray, fallbackModel: String? = null): String {
-        val strategy = getActiveStrategy()
+    private fun makeGroqApiRequest(
+        model: String,
+        messages: JSONArray,
+        fallbackModel: String? = null,
+        forcedStrategy: String? = null
+    ): String {
+        val strategy = forcedStrategy ?: getActiveStrategy()
         val url = if (strategy == "SUPABASE_PROXY") {
             "$supabaseUrl/functions/v1/groq-chat"
         } else {
@@ -428,7 +457,7 @@ class GroqService {
             } else {
                 Log.e("GroqService", "API Error: ${response.code} $resBody")
                 if (fallbackModel != null && (response.code == 404 || response.code == 400) && model != fallbackModel) {
-                    return makeGroqApiRequest(fallbackModel, messages, null)
+                    return makeGroqApiRequest(fallbackModel, messages, null, forcedStrategy)
                 }
                 return "Error (HTTP ${response.code}) $resBody"
             }
@@ -439,8 +468,8 @@ class GroqService {
         imageBitmap: Bitmap,
         products: List<ProductEntity>
     ): String = withContext(Dispatchers.IO) {
-        val strategy = getActiveStrategy()
-        Log.d("GroqService", "Selected OCR strategy: $strategy")
+        val preferredStrategy = getActiveStrategy()
+        Log.d("GroqService", "Preferred OCR strategy: $preferredStrategy")
 
         // 1. Preprocess then run on-device local text recognition
         val preprocessed = OcrPreprocessor.preprocessImage(imageBitmap)
@@ -499,45 +528,64 @@ class GroqService {
             ---
         """.trimIndent()
 
-        if (strategy == "GEMINI_DIRECT") {
+        val strategiesToTry = mutableListOf<String>()
+        strategiesToTry.add(preferredStrategy)
+
+        if (preferredStrategy == "SUPABASE_PROXY") {
+            val hasGroq = try {
+                BuildConfig.GROQ_API_KEY.isNotEmpty() && BuildConfig.GROQ_API_KEY != "MY_GROQ_API_KEY"
+            } catch (e: Throwable) { false }
+            if (hasGroq) {
+                strategiesToTry.add("GROQ_DIRECT")
+            }
+            strategiesToTry.add("GEMINI_DIRECT")
+        } else if (preferredStrategy == "GROQ_DIRECT") {
+            strategiesToTry.add("GEMINI_DIRECT")
+        }
+
+        var lastError = ""
+        for (strategy in strategiesToTry) {
+            Log.d("GroqService", "Trying OCR strategy: $strategy")
             try {
-                return@withContext makeGeminiRequestDirect(systemPrompt, userMessage, true)
+                if (strategy == "GEMINI_DIRECT") {
+                    val res = makeGeminiRequestDirect(systemPrompt, userMessage, true)
+                    if (!res.startsWith("Error:") && res.trim().startsWith("{")) {
+                        return@withContext res
+                    }
+                    lastError = res
+                    Log.w("GroqService", "Gemini OCR strategy returned error: $res")
+                } else {
+                    val messagesArray = JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("role", "system")
+                            put("content", systemPrompt)
+                        })
+                        put(JSONObject().apply {
+                            put("role", "user")
+                            put("content", userMessage)
+                        })
+                    }
+
+                    // Call Groq Vision OCR Model
+                    val result = makeGroqApiRequest(ocrModelName, messagesArray, ocrModelFallback, forcedStrategy = strategy)
+                    if (!result.startsWith("Error") && !result.contains("Requested function was not found")) {
+                        var cleanedResult = result.trim()
+                        if (cleanedResult.startsWith("```json")) { cleanedResult = cleanedResult.substring(7) }
+                        else if (cleanedResult.startsWith("```")) { cleanedResult = cleanedResult.substring(3) }
+                        if (cleanedResult.endsWith("```")) { cleanedResult = cleanedResult.substring(0, cleanedResult.length - 3) }
+                        cleanedResult = cleanedResult.trim()
+                        return@withContext cleanedResult
+                    }
+                    lastError = result
+                    Log.w("GroqService", "Groq OCR strategy $strategy returned error/not_found: $result")
+                }
             } catch (e: Exception) {
-                Log.e("GroqService", "Gemini OCR format failed", e)
+                lastError = e.localizedMessage ?: "Unknown exception"
+                Log.e("GroqService", "OCR Strategy $strategy failed with exception", e)
             }
         }
 
-        try {
-            val messagesArray = JSONArray().apply {
-                put(JSONObject().apply {
-                    put("role", "system")
-                    put("content", systemPrompt)
-                })
-                put(JSONObject().apply {
-                    put("role", "user")
-                    put("content", userMessage)
-                })
-            }
-
-            // Call Groq Vision OCR Model
-            val result = makeGroqApiRequest(ocrModelName, messagesArray, ocrModelFallback)
-            
-            var cleanedResult = result.trim()
-            if (cleanedResult.startsWith("```json")) {
-                cleanedResult = cleanedResult.substring(7)
-            } else if (cleanedResult.startsWith("```")) {
-                cleanedResult = cleanedResult.substring(3)
-            }
-            if (cleanedResult.endsWith("```")) {
-                cleanedResult = cleanedResult.substring(0, cleanedResult.length - 3)
-            }
-            cleanedResult = cleanedResult.trim()
-            
-            return@withContext cleanedResult
-        } catch (e: Exception) {
-            Log.e("GroqService", "OCR API failed", e)
-            "{\"error\": \"OCR API error: ${e.localizedMessage}\"}"
-        }
+        "{\"error\": \"OCR parsing completely failed. Last error: $lastError\"}"
     }
 
     private suspend fun runOnDeviceOcr(bitmap: Bitmap): String = suspendCancellableCoroutine { continuation ->
