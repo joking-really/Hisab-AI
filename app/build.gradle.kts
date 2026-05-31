@@ -101,6 +101,7 @@ dependencies {
   // implementation(libs.play.services.location)
   implementation(libs.play.services.mlkit.text.recognition)
   implementation(libs.retrofit)
+  implementation("com.itextpdf:itext7-core:8.0.3")
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)

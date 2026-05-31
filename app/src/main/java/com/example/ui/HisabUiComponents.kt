@@ -1335,7 +1335,7 @@ fun ParchiOcrScreen(viewModel: HisabViewModel) {
                         Text("Scanned items ledger summary:", fontWeight = FontWeight.Bold, color = LightText, fontSize = 12.sp)
                     }
 
-                    items(viewModel.ocrItems.value) { item ->
+                    items(viewModel.ocrItems.value) { item: SaleItem ->
                         Card(
                             colors = CardDefaults.cardColors(containerColor = SlateGraySurface),
                             border = BorderStroke(1.dp, SlateGrayBorder)

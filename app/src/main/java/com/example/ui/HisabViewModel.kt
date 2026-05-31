@@ -17,7 +17,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import org.json.JSONArray
 import org.json.JSONObject
+import java.util.Calendar
 
 // Navigation destinations inside State
 enum class UIState {
@@ -38,7 +40,7 @@ class HisabViewModel(application: Application) : AndroidViewModel(application) {
     private val groqService = GroqService()
 
     // Database flows
-    val accounts: StateFlow<List<AccountEntity>> = repo.allAccounts.stateIn(
+    val accounts: StateFlow<List<AccountBalanceView>> = repo.getTrialBalance(null, null).stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),
         initialValue = emptyList()
@@ -70,16 +72,17 @@ class HisabViewModel(application: Application) : AndroidViewModel(application) {
 
     // UI state
     var currentScreen by mutableStateOf(UIState.DASHBOARD)
-    var selectedCustomer: CustomerEntity? by mutableStateOf(null)
+    var selectedCustomer by mutableStateOf<CustomerEntity?>(null)
 
     // OCR Scanning temporary hold
-    var scannedBitmap: Bitmap? by mutableStateOf(null)
+    var scannedBitmap by mutableStateOf<Bitmap?>(null)
     var isOcrProcessing by mutableStateOf(false)
     var ocrResultOcrJson by mutableStateOf<String?>(null)
     var ocrCustomerName by mutableStateOf("")
     var ocrPaymentType by mutableStateOf("CREDIT")
     var ocrItems = mutableStateOf<List<SaleItem>>(emptyList())
     var ocrTotal by mutableStateOf(0.0)
+    var ocrConfidence by mutableStateOf(1.0)
 
     // Chatbot States
     var chatInputText by mutableStateOf("")
@@ -108,7 +111,6 @@ class HisabViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun preseedShoroomProductsAndCustomers() {
         val currentPd = repo.allProducts.first()
         if (currentPd.isEmpty()) {
-            // Seed 5 high-quality products
             repo.addProduct(
                 sku = "TI-MARB-01",
                 name = "Royal Glazed White Marble (12x12)",
@@ -170,7 +172,6 @@ class HisabViewModel(application: Application) : AndroidViewModel(application) {
                 initGodownQty = 40
             )
 
-            // Seed Customers
             val c1Id = repo.addCustomer(
                 name = "Ali Traders (Gulshan)",
                 shopName = "Ali Tile Plaza",
@@ -196,7 +197,6 @@ class HisabViewModel(application: Application) : AndroidViewModel(application) {
                 terms = 15
             )
 
-            // Let's seed pre-existing transactions for these customers to show active outstanding bills beautifully!
             repo.recordSale(
                 customerId = c1Id.toInt(),
                 customerName = "Ali Traders (Gulshan)",
@@ -219,7 +219,6 @@ class HisabViewModel(application: Application) : AndroidViewModel(application) {
                 paymentAccountCode = "1000"
             )
 
-            // A payment receipt too
             repo.recordPayment(
                 customerId = c1Id.toInt(),
                 customerName = "Ali Traders (Gulshan)",
@@ -227,6 +226,83 @@ class HisabViewModel(application: Application) : AndroidViewModel(application) {
                 methodAccountCode = "1000",
                 notes = "Advance cash deposit at counter"
             )
+        }
+    }
+
+    suspend fun executeTool(name: String, arguments: Map<String, Any>): String {
+        return try {
+            when (name) {
+                "get_customer_balance" -> {
+                    val nameQuery = arguments["name"] as? String ?: ""
+                    val found = customers.value.find { 
+                        it.name.contains(nameQuery, ignoreCase = true) || 
+                        it.shopName.contains(nameQuery, ignoreCase = true) 
+                    }
+                    if (found == null) {
+                        "Customer '$nameQuery' database mein nahi mila."
+                    } else {
+                        "Customer: ${found.name}\nShop: ${found.shopName}\nOutstanding Udhar: Rs. ${found.runningBalance}\nLimit: Rs. ${found.creditLimit}"
+                    }
+                }
+                "get_stock_level" -> {
+                    val nameQuery = arguments["name"] as? String ?: ""
+                    val location = arguments["location"] as? String ?: ""
+                    val found = products.value.find { 
+                        it.name.contains(nameQuery, ignoreCase = true) || 
+                        it.sku.equals(nameQuery, ignoreCase = true) 
+                    }
+                    if (found == null) {
+                        "Product '$nameQuery' catalogues mein nahi mila."
+                    } else {
+                        val showroomVal = found.showroomQty
+                        val godownVal = found.godownQty
+                        if (location.lowercase() == "showroom") {
+                            "${found.name} is available in Showroom: $showroomVal pcs (Price: Rs. ${found.salePrice})."
+                        } else if (location.lowercase() == "godown") {
+                            "${found.name} is available in Godown: $godownVal pcs (Price: Rs. ${found.salePrice})."
+                        } else {
+                            "${found.name} total stock:\n- Showroom: $showroomVal pcs\n- Godown: $godownVal pcs\n- Price: Rs. ${found.salePrice}"
+                        }
+                    }
+                }
+                "get_daily_summary" -> {
+                    val salesList = repo.allSales.first()
+                    val today = System.currentTimeMillis()
+                    val calendarToday = Calendar.getInstance().apply { timeInMillis = today }
+                    val salesToday = salesList.filter { sale ->
+                        val calendarSale = Calendar.getInstance().apply { timeInMillis = sale.date }
+                        calendarSale.get(Calendar.YEAR) == calendarToday.get(Calendar.YEAR) &&
+                        calendarSale.get(Calendar.DAY_OF_YEAR) == calendarToday.get(Calendar.DAY_OF_YEAR)
+                    }
+                    val totalRevenue = salesToday.sumOf { it.totalAmount }
+                    val count = salesToday.size
+                    "Daily Sales Summary Today:\n- Total Sales Revenue: Rs. $totalRevenue\n- Quantity of Invoices issued today: $count"
+                }
+                "get_overdue_accounts" -> {
+                    val list = customers.value.filter { it.runningBalance > 0 }
+                    if (list.isEmpty()) {
+                        "Sab clean hai! Koi overdue outstanding khata accounts nahi hain."
+                    } else {
+                        val sb = StringBuilder("Overdue Credit Customers:\n")
+                        list.forEach { 
+                            sb.append("- ${it.name}: Rs. ${it.runningBalance} [Max Limit: Rs. ${it.creditLimit}]\n")
+                        }
+                        sb.toString()
+                    }
+                }
+                "get_cash_position" -> {
+                    val accList = accounts.value
+                    val cashOnHand = accList.find { it.code == "1000" }?.balance ?: 0.0
+                    val bankAccount = accList.find { it.code == "1010" }?.balance ?: 0.0
+                    val walletWallet = accList.find { it.code == "1020" }?.balance ?: 0.0
+                    "Treasury Cash summary:\n- Vault (Cash in store): Rs. $cashOnHand\n- Bank Account: Rs. $bankAccount\n- Digital Registers (EasyPaisa/JazzCash): Rs. $walletWallet\n- Total Liquid Cash: Rs. ${cashOnHand + bankAccount + walletWallet}"
+                }
+                "suggest_sale" -> "Draft prepared for approval."
+                "suggest_payment" -> "Draft prepared for client payment and transaction receipt logs."
+                else -> "Query resolved."
+            }
+        } catch (e: Exception) {
+            "Technical query resolution failed: ${e.message}"
         }
     }
 
@@ -295,15 +371,16 @@ class HisabViewModel(application: Application) : AndroidViewModel(application) {
 
             val aiResponse = groqService.getChatResponse(
                 userInput = message,
-                history = updatedHistory.drop(1), // ignore first greet item
+                history = updatedHistory.drop(1),
                 customers = custs,
                 accounts = accs,
                 products = prods
-            )
+            ) { toolName, argsMap ->
+                executeTool(toolName, argsMap)
+            }
 
             isChatLoading = false
 
-            // Try to extract structured transaction recommendations if present
             tryParseActionJson(aiResponse)
 
             val parsedResponse = stripActionJson(aiResponse)
@@ -315,7 +392,6 @@ class HisabViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun tryParseActionJson(response: String) {
         try {
-            // Find any valid JSON block at the bottom
             val startIndex = response.lastIndexOf("{")
             val endIndex = response.lastIndexOf("}")
             if (startIndex in 0 until endIndex) {
@@ -328,7 +404,6 @@ class HisabViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         } catch (e: Exception) {
-            // ignored, no valid suggested action
             Log.d("HisabViewModel", "No suggested action JSON or failed to parse: ${e.message}")
         }
     }
@@ -372,7 +447,6 @@ class HisabViewModel(application: Application) : AndroidViewModel(application) {
                             val rate = jo.optDouble("rate", 0.0)
                             val loc = jo.optString("fromLocation", "GODOWN")
 
-                            // Check active product cost
                             val cost = repo.getProductBySku(sku)?.unitCost ?: 0.0
                             saleItemsList.add(
                                 SaleItem(
@@ -458,6 +532,7 @@ class HisabViewModel(application: Application) : AndroidViewModel(application) {
                 ocrCustomerName = json.optString("customerName", "Cash Walk-In")
                 ocrPaymentType = json.optString("paymentType", "CREDIT")
                 ocrTotal = json.optDouble("grandTotal", 0.0)
+                ocrConfidence = json.optDouble("confidence", 1.0)
 
                 val itemsArray = json.optJSONArray("items")
                 val parsedItems = mutableListOf<SaleItem>()
@@ -470,7 +545,7 @@ class HisabViewModel(application: Application) : AndroidViewModel(application) {
                         val rate = io.optDouble("rate", 0.0)
 
                         val p = repo.getProductBySku(sku)
-                        val cost = p?.unitCost ?: (rate * 0.6) // estimate cost if missing SKU
+                        val cost = p?.unitCost ?: (rate * 0.6)
                         parsedItems.add(
                             SaleItem(
                                 productSku = sku,
@@ -493,8 +568,9 @@ class HisabViewModel(application: Application) : AndroidViewModel(application) {
     fun clearOcrState() {
         scannedBitmap = null
         ocrResultOcrJson = null
-        ocrItems.value = emptyList()
+        ocrItems.value = emptyList<SaleItem>()
         ocrCustomerName = ""
         ocrTotal = 0.0
+        ocrConfidence = 1.0
     }
 }
