@@ -18,7 +18,7 @@ class AppRepository(private val appDao: AppDao) {
 
     val allAccounts: Flow<List<AccountEntity>> = appDao.getAllAccounts()
     val allCustomers: Flow<List<CustomerEntity>> = appDao.getAllCustomers().map { customerList ->
-        kotlinx.coroutines.runBlocking {
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             customerList.map { customer ->
                 val balance = appDao.getCustomerBalanceFromJournal(customer.id)
                 customer.apply { runningBalance = balance }
@@ -27,7 +27,7 @@ class AppRepository(private val appDao: AppDao) {
     }
     val allProducts: Flow<List<ProductEntity>> = appDao.getAllProducts()
     val allJournalEntries: Flow<List<JournalEntryEntity>> = appDao.getAllJournalEntries().map { entryList ->
-        kotlinx.coroutines.runBlocking {
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             entryList.map { entry ->
                 val lines = appDao.getJournalLinesForEntry(entry.id)
                 val totalAmount = lines.sumOf { it.debit }

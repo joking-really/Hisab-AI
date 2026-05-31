@@ -165,6 +165,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "hisab_ai_database"
                 )
+                    .fallbackToDestructiveMigration(true)
                     .addMigrations(MIGRATION_1_2)
                     .build()
                 INSTANCE = instance
