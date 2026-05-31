@@ -1126,11 +1126,51 @@ fun uriToBitmap(context: Context, uri: Uri): Bitmap? {
     }
 }
 
+fun createTempImageFileUri(context: Context): Uri {
+    val tempFile = java.io.File.createTempFile("parchi_scan_", ".jpg", context.cacheDir).apply {
+        deleteOnExit()
+    }
+    return androidx.core.content.FileProvider.getUriForFile(
+        context,
+        "${context.packageName}.fileprovider",
+        tempFile
+    )
+}
+
 @Composable
 fun ParchiOcrScreen(viewModel: HisabViewModel) {
     val context = LocalContext.current
     val isOcrProcessing = viewModel.isOcrProcessing
     val bitmap = viewModel.scannedBitmap
+
+    var tempPhotoUri by remember { mutableStateOf<Uri?>(null) }
+
+    val cameraLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture()
+    ) { success ->
+        if (success) {
+            tempPhotoUri?.let { uri ->
+                val loadedBitmap = uriToBitmap(context, uri)
+                if (loadedBitmap != null) {
+                    viewModel.uploadReceiptAndTriggerOcr(loadedBitmap)
+                } else {
+                    Toast.makeText(context, "Error loading captured photo", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            val uri = createTempImageFileUri(context)
+            tempPhotoUri = uri
+            cameraLauncher.launch(uri)
+        } else {
+            Toast.makeText(context, "Camera permission is required to scan invoices on the spot.", Toast.LENGTH_LONG).show()
+        }
+    }
 
     val imagePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -1159,11 +1199,13 @@ fun ParchiOcrScreen(viewModel: HisabViewModel) {
                 modifier = Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
-                // Option A: Upload Real Bill
+                // Option A: Scan with Camera on the Spot
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { imagePickerLauncher.launch("image/*") },
+                        .clickable {
+                            cameraPermissionLauncher.launch(android.Manifest.permission.CAMERA)
+                        },
                     colors = CardDefaults.cardColors(containerColor = SlateGraySurface),
                     shape = RoundedCornerShape(16.dp),
                     border = BorderStroke(1.dp, EmeraldAccent)
@@ -1178,17 +1220,46 @@ fun ParchiOcrScreen(viewModel: HisabViewModel) {
                                 .background(EmeraldLight, CircleShape),
                             contentAlignment = Alignment.Center
                         ) {
-                            Icon(Icons.Default.Add, contentDescription = "Upload", tint = EmeraldAccent, modifier = Modifier.size(24.dp))
+                            Icon(Icons.Default.Add, contentDescription = "Camera", tint = EmeraldAccent, modifier = Modifier.size(24.dp))
                         }
                         Spacer(modifier = Modifier.width(14.dp))
                         Column(modifier = Modifier.weight(1f)) {
-                            Text("Select Real Parchi Receipt", color = LightText, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                            Text("Upload a photo from gallery for live local OCR + Groq data structuring", color = MutedSlate, fontSize = 11.sp, lineHeight = 16.sp)
+                            Text("Scan Parchi on the Spot", color = LightText, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Text("Use machine camera to take picture of invoice is verified in live database", color = MutedSlate, fontSize = 11.sp, lineHeight = 16.sp)
                         }
                     }
                 }
 
-                // Option B: Template sandbox
+                // Option B: Select Real Bill from Gallery
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { imagePickerLauncher.launch("image/*") },
+                    colors = CardDefaults.cardColors(containerColor = SlateGraySurface),
+                    shape = RoundedCornerShape(16.dp),
+                    border = BorderStroke(1.dp, SlateGrayBorder)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(18.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(48.dp)
+                                .background(SlateGrayBorder.copy(alpha = 0.5f), CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Default.Share, contentDescription = "Upload", tint = MutedSlate, modifier = Modifier.size(24.dp))
+                        }
+                        Spacer(modifier = Modifier.width(14.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Select Parchi from Gallery", color = LightText, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Text("Upload a pre-clicked picture from device photos for character extraction", color = MutedSlate, fontSize = 11.sp, lineHeight = 16.sp)
+                        }
+                    }
+                }
+
+                // Option C: Template sandbox
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1207,7 +1278,7 @@ fun ParchiOcrScreen(viewModel: HisabViewModel) {
                         Box(
                             modifier = Modifier
                                 .size(48.dp)
-                                .background(SlateGrayBorder.copy(alpha = 0.5f), CircleShape),
+                                .background(SlateGrayBorder.copy(alpha = 0.3f), CircleShape),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(Icons.Default.Info, contentDescription = "Draft", tint = MutedSlate, modifier = Modifier.size(24.dp))

@@ -249,9 +249,62 @@ class GroqService {
             
             recognizer.process(image)
                 .addOnSuccessListener { visionText ->
-                    val text = visionText.text
-                    Log.i("GroqService", "Local OCR recognized: $text")
-                    continuation.resume(text)
+                    // Structure to hold text line bounding parameters
+                    class OcrLine(val text: String, val top: Int, val left: Int, val bottom: Int)
+
+                    val ocrLines = mutableListOf<OcrLine>()
+                    for (block in visionText.textBlocks) {
+                        for (line in block.lines) {
+                            val box = line.boundingBox
+                            val top = box?.top ?: 0
+                            val left = box?.left ?: 0
+                            val bottom = box?.bottom ?: 0
+                            ocrLines.add(OcrLine(line.text, top, left, bottom))
+                        }
+                    }
+
+                    if (ocrLines.isEmpty()) {
+                        Log.i("GroqService", "Local OCR recognized no text elements.")
+                        continuation.resume("")
+                        return@addOnSuccessListener
+                    }
+
+                    // Cluster lines into horizontal rows
+                    val sortedLines = ocrLines.sortedBy { it.top }
+                    val rows = mutableListOf<MutableList<OcrLine>>()
+
+                    for (line in sortedLines) {
+                        var placed = false
+                        for (row in rows) {
+                            val rowAvgTop = row.map { it.top }.average()
+                            val rowAvgHeight = row.map { it.bottom - it.top }.average()
+                            val threshold = if (rowAvgHeight > 0) rowAvgHeight * 0.7 else 15.0
+                            if (Math.abs(line.top - rowAvgTop) < threshold) {
+                                row.add(line)
+                                placed = true
+                                break
+                            }
+                        }
+                        if (!placed) {
+                            rows.add(mutableListOf(line))
+                        }
+                    }
+
+                    // Format each horizontal row, sorting elements from left to right
+                    val finalSb = StringBuilder()
+                    val sortedRows = rows.sortedBy { r -> r.map { it.top }.average() }
+                    for (row in sortedRows) {
+                        val sortedRowLines = row.sortedBy { it.left }
+                        val rowText = sortedRowLines.joinToString("   |   ") { it.text }
+                        finalSb.append(rowText).append("\n")
+                    }
+
+                    val reconstructedText = finalSb.toString().trim()
+                    Log.i("GroqService", "Formatted OCR text reconstruction:\n$reconstructedText")
+
+                    // Fallback to simple concatenated text if reconstruction gets blank
+                    val resultText = if (reconstructedText.isNotEmpty()) reconstructedText else visionText.text
+                    continuation.resume(resultText)
                 }
                 .addOnFailureListener { e ->
                     Log.e("GroqService", "Local OCR process failed", e)
