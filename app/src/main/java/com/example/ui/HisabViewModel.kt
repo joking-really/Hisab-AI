@@ -8,7 +8,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.ai.GeminiService
+import com.example.ai.GroqService
 import com.example.data.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -35,7 +35,7 @@ class HisabViewModel(application: Application) : AndroidViewModel(application) {
 
     private val db = AppDatabase.getDatabase(application)
     private val repo = AppRepository(db.appDao)
-    private val geminiService = GeminiService()
+    private val groqService = GroqService()
 
     // Database flows
     val accounts: StateFlow<List<AccountEntity>> = repo.allAccounts.stateIn(
@@ -293,7 +293,7 @@ class HisabViewModel(application: Application) : AndroidViewModel(application) {
             val accs = accounts.value
             val prods = products.value
 
-            val aiResponse = geminiService.getChatResponse(
+            val aiResponse = groqService.getChatResponse(
                 userInput = message,
                 history = updatedHistory.drop(1), // ignore first greet item
                 customers = custs,
@@ -449,7 +449,7 @@ class HisabViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             val prods = repo.allProducts.first()
-            val parsedResult = geminiService.parseParchiOcr(bitmap, prods)
+            val parsedResult = groqService.parseParchiOcr(bitmap, prods)
             isOcrProcessing = false
             ocrResultOcrJson = parsedResult
 

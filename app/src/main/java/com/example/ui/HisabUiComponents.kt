@@ -43,6 +43,12 @@ import com.example.data.*
 import com.example.ui.theme.*
 import java.text.SimpleDateFormat
 import java.util.*
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import android.net.Uri
+import android.graphics.ImageDecoder
+import android.os.Build
+import android.provider.MediaStore
 
 @Composable
 fun MainAppScreen(viewModel: HisabViewModel = viewModel()) {
@@ -1102,11 +1108,42 @@ fun ReportRow(label: String, value: Double, isHeader: Boolean, positive: Boolean
 // ---------------------------------------------------------------------------------------------------------------------
 // 7. PARCHI VISION OCR SCANNING SCREEN
 // ---------------------------------------------------------------------------------------------------------------------
+// Helper for Uri decoding
+fun uriToBitmap(context: Context, uri: Uri): Bitmap? {
+    return try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val source = ImageDecoder.createSource(context.contentResolver, uri)
+            ImageDecoder.decodeBitmap(source) { decoder, _, _ ->
+                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            MediaStore.Images.Media.getBitmap(context.contentResolver, uri)
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+        null
+    }
+}
+
 @Composable
 fun ParchiOcrScreen(viewModel: HisabViewModel) {
     val context = LocalContext.current
     val isOcrProcessing = viewModel.isOcrProcessing
     val bitmap = viewModel.scannedBitmap
+
+    val imagePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        uri?.let {
+            val loadedBitmap = uriToBitmap(context, it)
+            if (loadedBitmap != null) {
+                viewModel.uploadReceiptAndTriggerOcr(loadedBitmap)
+            } else {
+                Toast.makeText(context, "Error loading selected image", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -1118,24 +1155,69 @@ fun ParchiOcrScreen(viewModel: HisabViewModel) {
         Spacer(modifier = Modifier.height(8.dp))
 
         if (bitmap == null) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(200.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(SlateGraySurface)
-                    .border(1.dp, EmeraldAccent, RoundedCornerShape(12.dp))
-                    .clickable {
-                        val sample = generateMockParchiBitmap(context)
-                        viewModel.uploadReceiptAndTriggerOcr(sample)
-                    },
-                contentAlignment = Alignment.Center
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(Icons.Default.Warning, contentDescription = null, tint = EmeraldAccent, modifier = Modifier.size(36.dp))
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Text("Snap / Upload Parchi Receipt", color = LightText, fontWeight = FontWeight.Bold)
-                    Text("Simulated snap of Pottery written bill", color = MutedSlate, fontSize = 10.sp)
+                // Option A: Upload Real Bill
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { imagePickerLauncher.launch("image/*") },
+                    colors = CardDefaults.cardColors(containerColor = SlateGraySurface),
+                    shape = RoundedCornerShape(16.dp),
+                    border = BorderStroke(1.dp, EmeraldAccent)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(18.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(48.dp)
+                                .background(EmeraldLight, CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = "Upload", tint = EmeraldAccent, modifier = Modifier.size(24.dp))
+                        }
+                        Spacer(modifier = Modifier.width(14.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Select Real Parchi Receipt", color = LightText, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Text("Upload a photo from gallery for live local OCR + Groq data structuring", color = MutedSlate, fontSize = 11.sp, lineHeight = 16.sp)
+                        }
+                    }
+                }
+
+                // Option B: Template sandbox
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            val sample = generateMockParchiBitmap(context)
+                            viewModel.uploadReceiptAndTriggerOcr(sample)
+                        },
+                    colors = CardDefaults.cardColors(containerColor = SlateGraySurface),
+                    shape = RoundedCornerShape(16.dp),
+                    border = BorderStroke(1.dp, SlateGrayBorder)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(18.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(48.dp)
+                                .background(SlateGrayBorder.copy(alpha = 0.5f), CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Default.Info, contentDescription = "Draft", tint = MutedSlate, modifier = Modifier.size(24.dp))
+                        }
+                        Spacer(modifier = Modifier.width(14.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Use Simulated Sandbox Parchi", color = LightText, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Text("Loads a pregenerated Saddar Ceramics ivory commode written bill to test OCR", color = MutedSlate, fontSize = 11.sp, lineHeight = 16.sp)
+                        }
+                    }
                 }
             }
         } else {
@@ -1153,7 +1235,7 @@ fun ParchiOcrScreen(viewModel: HisabViewModel) {
             Spacer(modifier = Modifier.height(12.dp))
 
             if (isOcrProcessing) {
-                Text("Gemini Vision API mapping ledger parameters...", color = EmeraldLight, fontSize = 12.sp)
+                Text("Groq Llama 4 Scout translating parchi to ledger...", color = EmeraldLight, fontSize = 12.sp)
             } else {
                 LazyColumn(
                     modifier = Modifier.weight(1f).fillMaxWidth(),
