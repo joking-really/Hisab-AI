@@ -42,6 +42,30 @@ class GroqService {
     private val chatModelFallback = "llama3-70b-8192"
     private val ocrModelFallback = "llama-3.1-8b-instant"
 
+    private fun getActiveStrategy(): String {
+        val hasSupabase = try {
+            BuildConfig.SUPABASE_URL.isNotEmpty() && 
+            BuildConfig.SUPABASE_URL != "https://your-project-ref.supabase.co" && 
+            BuildConfig.SUPABASE_ANON_KEY.isNotEmpty() && 
+            !BuildConfig.SUPABASE_ANON_KEY.startsWith("eyJhbGciOiJIUzI1NiIs")
+        } catch (e: Throwable) {
+            false
+        }
+
+        val hasGroq = try {
+            BuildConfig.GROQ_API_KEY.isNotEmpty() && 
+            BuildConfig.GROQ_API_KEY != "MY_GROQ_API_KEY"
+        } catch (e: Throwable) {
+            false
+        }
+
+        return when {
+            hasSupabase -> "SUPABASE_PROXY"
+            hasGroq -> "GROQ_DIRECT"
+            else -> "GEMINI_DIRECT"
+        }
+    }
+
     suspend fun getChatResponse(
         userInput: String,
         history: List<Pair<String, Boolean>>, // Pair(Message, isUser)
@@ -50,9 +74,8 @@ class GroqService {
         products: List<ProductEntity>,
         toolExecutor: suspend (String, Map<String, Any>) -> String
     ): String = withContext(Dispatchers.IO) {
-        if (supabaseUrl.isEmpty() || supabaseAnonKey.isEmpty() || supabaseUrl == "https://your-project-ref.supabase.co") {
-            return@withContext "Supabase credentials missing or set to placeholder. Please configure your SUPABASE_URL and SUPABASE_ANON_KEY in the Secrets panel to enable Hisab Assistant AI."
-        }
+        val strategy = getActiveStrategy()
+        Log.d("GroqService", "Active chat strategy: $strategy")
 
         val systemInstructionText = """
             You are Hisab Assistant, an AI accounting helper for a Pakistani ceramic distributor.
@@ -63,6 +86,7 @@ class GroqService {
             Whenever asked about stock, account balance, overdue accounts, or daily summary, ALWAYS use your tool function calls rather than guessing.
             When you want to schedule a sale draft or payment draft for the user to confirm, call suggest_sale or suggest_payment tool.
         """.trimIndent()
+
 
         // Tools Array JSON
         val toolsArray = JSONArray().apply {
@@ -203,6 +227,14 @@ class GroqService {
             })
         }
 
+        if (strategy == "GEMINI_DIRECT") {
+            try {
+                return@withContext callGeminiWithTools(systemInstructionText, history, userInput, toolsArray, toolExecutor)
+            } catch (e: Exception) {
+                Log.e("GroqService", "Gemini call failed, trying direct Groq fallback if configured", e)
+            }
+        }
+
         // Call Groq endpoint
         try {
             val messagesArray = JSONArray()
@@ -240,6 +272,19 @@ class GroqService {
         toolExecutor: suspend (String, Map<String, Any>) -> String,
         fallbackModel: String? = null
     ): String = withContext(Dispatchers.IO) {
+        val strategy = getActiveStrategy()
+        val url = if (strategy == "SUPABASE_PROXY") {
+            "$supabaseUrl/functions/v1/groq-chat"
+        } else {
+            "https://api.groq.com/openai/v1/chat/completions"
+        }
+
+        val authHeaderValue = if (strategy == "SUPABASE_PROXY") {
+            "Bearer $supabaseAnonKey"
+        } else {
+            "Bearer ${BuildConfig.GROQ_API_KEY}"
+        }
+
         val requestBodyJson = JSONObject().apply {
             put("model", model)
             put("messages", messages)
@@ -252,8 +297,8 @@ class GroqService {
         val requestBody = requestBodyJson.toString().toRequestBody(mediaType)
 
         val request = Request.Builder()
-            .url("$supabaseUrl/functions/v1/groq-chat")
-            .header("Authorization", "Bearer $supabaseAnonKey")
+            .url(url)
+            .header("Authorization", authHeaderValue)
             .post(requestBody)
             .build()
 
@@ -311,8 +356,8 @@ class GroqService {
                         }
                         val requestFinalBody = requestFinalBodyJson.toString().toRequestBody(mediaType)
                         val finalReq = Request.Builder()
-                            .url("$supabaseUrl/functions/v1/groq-chat")
-                            .header("Authorization", "Bearer $supabaseAnonKey")
+                            .url(url)
+                            .header("Authorization", authHeaderValue)
                             .post(requestFinalBody)
                             .build()
 
@@ -343,6 +388,19 @@ class GroqService {
     }
 
     private fun makeGroqApiRequest(model: String, messages: JSONArray, fallbackModel: String? = null): String {
+        val strategy = getActiveStrategy()
+        val url = if (strategy == "SUPABASE_PROXY") {
+            "$supabaseUrl/functions/v1/groq-chat"
+        } else {
+            "https://api.groq.com/openai/v1/chat/completions"
+        }
+
+        val authHeaderValue = if (strategy == "SUPABASE_PROXY") {
+            "Bearer $supabaseAnonKey"
+        } else {
+            "Bearer ${BuildConfig.GROQ_API_KEY}"
+        }
+
         val requestBodyJson = JSONObject().apply {
             put("model", model)
             put("messages", messages)
@@ -353,8 +411,8 @@ class GroqService {
         val requestBody = requestBodyJson.toString().toRequestBody(mediaType)
 
         val request = Request.Builder()
-            .url("$supabaseUrl/functions/v1/groq-chat")
-            .header("Authorization", "Bearer $supabaseAnonKey")
+            .url(url)
+            .header("Authorization", authHeaderValue)
             .post(requestBody)
             .build()
 
@@ -381,9 +439,8 @@ class GroqService {
         imageBitmap: Bitmap,
         products: List<ProductEntity>
     ): String = withContext(Dispatchers.IO) {
-        if (supabaseUrl.isEmpty() || supabaseAnonKey.isEmpty() || supabaseUrl == "https://your-project-ref.supabase.co") {
-            return@withContext "{\"error\": \"Supabase credentials missing. Configure in .env file.\"}"
-        }
+        val strategy = getActiveStrategy()
+        Log.d("GroqService", "Selected OCR strategy: $strategy")
 
         // 1. Preprocess then run on-device local text recognition
         val preprocessed = OcrPreprocessor.preprocessImage(imageBitmap)
@@ -441,6 +498,14 @@ class GroqService {
             $rawExtractedText
             ---
         """.trimIndent()
+
+        if (strategy == "GEMINI_DIRECT") {
+            try {
+                return@withContext makeGeminiRequestDirect(systemPrompt, userMessage, true)
+            } catch (e: Exception) {
+                Log.e("GroqService", "Gemini OCR format failed", e)
+            }
+        }
 
         try {
             val messagesArray = JSONArray().apply {
@@ -543,6 +608,271 @@ class GroqService {
                 }
         } catch (e: Exception) {
             continuation.resumeWithException(e)
+        }
+    }
+
+    private suspend fun callGeminiWithTools(
+        systemInstructionText: String,
+        history: List<Pair<String, Boolean>>,
+        userInput: String,
+        tools: JSONArray,
+        toolExecutor: suspend (String, Map<String, Any>) -> String
+    ): String = withContext(Dispatchers.IO) {
+        val apiKey = BuildConfig.GEMINI_API_KEY
+        val modelName = "gemini-3.5-flash"
+        val url = "https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent?key=$apiKey"
+
+        val contents = JSONArray()
+
+        // Map general conversational history to Gemini roles
+        for (turn in history) {
+            contents.put(JSONObject().apply {
+                put("role", if (turn.second) "user" else "model")
+                put("parts", JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("text", turn.first)
+                    })
+                })
+            })
+        }
+
+        // Add current input
+        contents.put(JSONObject().apply {
+            put("role", "user")
+            put("parts", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("text", userInput)
+                })
+            })
+        })
+
+        // Map tools to Gemini format
+        val funcsList = JSONArray()
+        for (i in 0 until tools.length()) {
+            val toolObj = tools.getJSONObject(i)
+            if (toolObj.optString("type") == "function") {
+                val funcObj = toolObj.getJSONObject("function")
+                val mappedFuncObj = mapFunctionPropertiesToGemini(funcObj)
+                funcsList.put(mappedFuncObj)
+            }
+        }
+        val geminiTools = JSONArray().apply {
+            put(JSONObject().apply {
+                put("functionDeclarations", funcsList)
+            })
+        }
+
+        val requestBodyJson = JSONObject().apply {
+            put("contents", contents)
+            put("systemInstruction", JSONObject().apply {
+                put("parts", JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("text", systemInstructionText)
+                    })
+                })
+            })
+            put("tools", geminiTools)
+            put("generationConfig", JSONObject().apply {
+                put("temperature", 0.2)
+            })
+        }
+
+        val mediaType = "application/json; charset=utf-8".toMediaType()
+        val requestBody = requestBodyJson.toString().toRequestBody(mediaType)
+
+        val request = Request.Builder()
+            .url(url)
+            .post(requestBody)
+            .build()
+
+        client.newCall(request).execute().use { response ->
+            val resBody = response.body?.string() ?: ""
+            if (!response.isSuccessful) {
+                return@withContext "Gemini API error (HTTP ${response.code}): $resBody"
+            }
+
+            val responseJson = JSONObject(resBody)
+            val candidates = responseJson.optJSONArray("candidates")
+            val candidate = candidates?.optJSONObject(0)
+            val contentObj = candidate?.optJSONObject("content")
+            val parts = contentObj?.optJSONArray("parts")
+            val firstPart = parts?.optJSONObject(0)
+
+            if (firstPart != null && firstPart.has("functionCall")) {
+                val functionCall = firstPart.getJSONObject("functionCall")
+                val name = functionCall.getString("name")
+                val argsObj = functionCall.optJSONObject("args")
+                val argsMap = mutableMapOf<String, Any>()
+                if (argsObj != null) {
+                    val keys = argsObj.keys()
+                    while (keys.hasNext()) {
+                        val key = keys.next()
+                        argsMap[key] = argsObj.get(key)
+                    }
+                }
+
+                // Execute local function against local Room database
+                val toolResult = toolExecutor(name, argsMap)
+
+                // Append assistant turn with functionCall
+                contents.put(JSONObject().apply {
+                    put("role", "model")
+                    put("parts", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("functionCall", functionCall)
+                        })
+                    })
+                })
+
+                // Append tool response turn
+                contents.put(JSONObject().apply {
+                    put("role", "function")
+                    put("parts", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("functionResponse", JSONObject().apply {
+                                put("name", name)
+                                put("response", JSONObject().apply {
+                                    put("result", toolResult)
+                                })
+                            })
+                        })
+                    })
+                })
+
+                // Request final response from Gemini
+                val finalRequestBodyJson = JSONObject().apply {
+                    put("contents", contents)
+                    put("systemInstruction", JSONObject().apply {
+                        put("parts", JSONArray().apply {
+                            put(JSONObject().apply {
+                                put("text", systemInstructionText)
+                            })
+                        })
+                    })
+                    put("generationConfig", JSONObject().apply {
+                        put("temperature", 0.2)
+                    })
+                }
+
+                val finalRequestBody = finalRequestBodyJson.toString().toRequestBody(mediaType)
+                val finalRequest = Request.Builder()
+                    .url(url)
+                    .post(finalRequestBody)
+                    .build()
+
+                client.newCall(finalRequest).execute().use { finalResponse ->
+                    val finalResBody = finalResponse.body?.string() ?: ""
+                    if (!finalResponse.isSuccessful) {
+                        return@withContext "Gemini API tool final response error (HTTP ${finalResponse.code}): $finalResBody"
+                    }
+
+                    val finalResponseJson = JSONObject(finalResBody)
+                    val fCandidates = finalResponseJson.optJSONArray("candidates")
+                    val fCandidate = fCandidates?.optJSONObject(0)
+                    val fContentObj = fCandidate?.optJSONObject("content")
+                    val fParts = fContentObj?.optJSONArray("parts")
+                    val fFirstPart = fParts?.optJSONObject(0)
+                    return@withContext fFirstPart?.optString("text") ?: "AI Tool final parsing error."
+                }
+            } else {
+                return@withContext firstPart?.optString("text") ?: "AI did not return text response."
+            }
+        }
+    }
+
+    private suspend fun makeGeminiRequestDirect(
+        systemInstructionText: String,
+        userInput: String,
+        asJson: Boolean = false
+    ): String = withContext(Dispatchers.IO) {
+        val apiKey = BuildConfig.GEMINI_API_KEY
+        val modelName = "gemini-3.5-flash"
+        val url = "https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent?key=$apiKey"
+
+        val contents = JSONArray().apply {
+            put(JSONObject().apply {
+                put("role", "user")
+                put("parts", JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("text", userInput)
+                    })
+                })
+            })
+        }
+
+        val requestBodyJson = JSONObject().apply {
+            put("contents", contents)
+            put("systemInstruction", JSONObject().apply {
+                put("parts", JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("text", systemInstructionText)
+                    })
+                })
+            })
+            put("generationConfig", JSONObject().apply {
+                put("temperature", 0.1)
+                if (asJson) {
+                    put("responseMimeType", "application/json")
+                }
+            })
+        }
+
+        val mediaType = "application/json; charset=utf-8".toMediaType()
+        val requestBody = requestBodyJson.toString().toRequestBody(mediaType)
+
+        val request = Request.Builder()
+            .url(url)
+            .post(requestBody)
+            .build()
+
+        client.newCall(request).execute().use { response ->
+            val resBody = response.body?.string() ?: ""
+            if (!response.isSuccessful) {
+                return@withContext "Error: Gemini API direct failed (HTTP ${response.code}): $resBody"
+            }
+
+            val responseJson = JSONObject(resBody)
+            val candidates = responseJson.optJSONArray("candidates")
+            val candidate = candidates?.optJSONObject(0)
+            val contentObj = candidate?.optJSONObject("content")
+            val parts = contentObj?.optJSONArray("parts")
+            val firstPart = parts?.optJSONObject(0)
+            return@withContext firstPart?.optString("text") ?: "AI error."
+        }
+    }
+
+    private fun mapFunctionPropertiesToGemini(funcObj: JSONObject): JSONObject {
+        val result = JSONObject(funcObj.toString())
+        if (result.has("parameters")) {
+            val params = result.getJSONObject("parameters")
+            capitalizeTypeInJson(params)
+        }
+        return result
+    }
+
+    private fun capitalizeTypeInJson(obj: JSONObject) {
+        if (obj.has("type")) {
+            val t = obj.get("type")
+            if (t is String) {
+                obj.put("type", t.uppercase())
+            }
+        }
+        if (obj.has("properties")) {
+            val props = obj.getJSONObject("properties")
+            val keys = props.keys()
+            while (keys.hasNext()) {
+                val key = keys.next()
+                val prop = props.optJSONObject(key)
+                if (prop != null) {
+                    capitalizeTypeInJson(prop)
+                }
+            }
+        }
+        if (obj.has("items")) {
+            val itemsObj = obj.optJSONObject("items")
+            if (itemsObj != null) {
+                capitalizeTypeInJson(itemsObj)
+            }
         }
     }
 }
