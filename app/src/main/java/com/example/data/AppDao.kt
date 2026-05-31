@@ -44,9 +44,6 @@ interface AppDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertCustomer(customer: CustomerEntity): Long
 
-    @Query("UPDATE customers SET runningBalance = runningBalance + :amount WHERE id = :id")
-    suspend fun updateCustomerBalance(id: Int, amount: Double)
-
     // Products
     @Query("SELECT * FROM products ORDER BY name ASC")
     fun getAllProducts(): Flow<List<ProductEntity>>
@@ -109,6 +106,23 @@ interface AppDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertPayment(payment: PaymentEntity): Long
+
+    @Query("SELECT COUNT(*) FROM payments WHERE paymentNumber LIKE :prefix || '-%'")
+    fun countPaymentsInMonth(prefix: String): Int
+
+    @Query("""
+        SELECT 
+            COALESCE(SUM(jl.debit), 0.0) - COALESCE(SUM(jl.credit), 0.0) as balance
+        FROM journal_lines jl
+        JOIN journal_entries je ON jl.journalEntryId = je.id
+        WHERE je.customerId = :customerId 
+        AND jl.accountCode = '1200'
+        AND je.refType IN ('SALE', 'PAYMENT')
+    """)
+    fun getCustomerBalanceFromJournal(customerId: Int): Double
+
+    @Query("SELECT * FROM journal_lines WHERE journalEntryId = :entryId")
+    fun getJournalLinesForEntry(entryId: Long): List<JournalLineEntity>
 
     // Stock Movements
     @Query("SELECT * FROM stock_movements ORDER BY date DESC")

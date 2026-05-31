@@ -685,7 +685,7 @@ fun CustomerDetailScreen(viewModel: HisabViewModel) {
             onSave = { amount, methodAccount, notes ->
                 viewModel.executePayment(customer.id, customer.name, amount, methodAccount, notes) { entryCode ->
                     Toast.makeText(context, "Logged Repayment $entryCode", Toast.LENGTH_SHORT).show()
-                    viewModel.selectedCustomer = customer.copy(runningBalance = customer.runningBalance - amount)
+                    viewModel.selectedCustomer = customer.copy().apply { runningBalance = customer.runningBalance - amount }
                     showRepaymentDialog = false
                 }
             }

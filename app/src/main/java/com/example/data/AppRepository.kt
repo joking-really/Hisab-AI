@@ -2,6 +2,7 @@ package com.example.data
 
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import java.util.Calendar
 
 data class SaleItem(
@@ -16,9 +17,30 @@ data class SaleItem(
 class AppRepository(private val appDao: AppDao) {
 
     val allAccounts: Flow<List<AccountEntity>> = appDao.getAllAccounts()
-    val allCustomers: Flow<List<CustomerEntity>> = appDao.getAllCustomers()
+    val allCustomers: Flow<List<CustomerEntity>> = appDao.getAllCustomers().map { customerList ->
+        kotlinx.coroutines.runBlocking {
+            customerList.map { customer ->
+                val balance = appDao.getCustomerBalanceFromJournal(customer.id)
+                customer.apply { runningBalance = balance }
+            }
+        }
+    }
     val allProducts: Flow<List<ProductEntity>> = appDao.getAllProducts()
-    val allJournalEntries: Flow<List<JournalEntryEntity>> = appDao.getAllJournalEntries()
+    val allJournalEntries: Flow<List<JournalEntryEntity>> = appDao.getAllJournalEntries().map { entryList ->
+        kotlinx.coroutines.runBlocking {
+            entryList.map { entry ->
+                val lines = appDao.getJournalLinesForEntry(entry.id)
+                val totalAmount = lines.sumOf { it.debit }
+                val firstDebit = lines.firstOrNull { it.debit > 0 }?.accountCode ?: ""
+                val firstCredit = lines.firstOrNull { it.credit > 0 }?.accountCode ?: ""
+                entry.apply {
+                    amount = totalAmount
+                    debitAccountCode = firstDebit
+                    creditAccountCode = firstCredit
+                }
+            }
+        }
+    }
     val allStockMovements: Flow<List<StockMovementEntity>> = appDao.getAllStockMovements()
     val allSales: Flow<List<SaleEntity>> = appDao.getAllSales()
     val allPayments: Flow<List<PaymentEntity>> = appDao.getAllPayments()
@@ -73,10 +95,7 @@ class AppRepository(private val appDao: AppDao) {
                 entryNumber = entryNumber,
                 date = System.currentTimeMillis(),
                 description = "Opening Balance Setup",
-                refType = "ADJUSTMENT",
-                amount = 915000.0,
-                debitAccountCode = "1000",
-                creditAccountCode = "3000"
+                refType = "ADJUSTMENT"
             )
             
             // Setting up opening cash, bank, inventory on Dr versus capital on Cr
@@ -100,8 +119,7 @@ class AppRepository(private val appDao: AppDao) {
             phone = phone,
             address = address,
             creditLimit = creditLimit,
-            paymentTermsDays = terms,
-            runningBalance = 0.0
+            paymentTermsDays = terms
         )
         return appDao.insertCustomer(customer)
     }
@@ -151,10 +169,7 @@ class AppRepository(private val appDao: AppDao) {
                 entryNumber = entryNumber,
                 date = System.currentTimeMillis(),
                 description = "Initial showroom stock for $name",
-                refType = "STOCK_IN",
-                amount = costTotalShowroom,
-                debitAccountCode = "1100",
-                creditAccountCode = "3000"
+                refType = "STOCK_IN"
             )
             val lines = listOf(
                 JournalLineEntity(journalEntryId = 0, accountCode = "1100", debit = costTotalShowroom, credit = 0.0, description = "Showroom inventory expansion for SKU: $sku"),
@@ -176,10 +191,7 @@ class AppRepository(private val appDao: AppDao) {
                 entryNumber = entryNumber,
                 date = System.currentTimeMillis(),
                 description = "Initial godown stock for $name",
-                refType = "STOCK_IN",
-                amount = costTotalGodown,
-                debitAccountCode = "1110",
-                creditAccountCode = "3000"
+                refType = "STOCK_IN"
             )
             val lines = listOf(
                 JournalLineEntity(journalEntryId = 0, accountCode = "1110", debit = costTotalGodown, credit = 0.0, description = "Godown inventory expansion for SKU: $sku"),
@@ -205,7 +217,8 @@ class AppRepository(private val appDao: AppDao) {
             require(customerId != null) { "Credit sale requires a customer" }
             val customer = appDao.getCustomerById(customerId)
             require(customer != null) { "Customer not found in database" }
-            val projectedBalance = customer.runningBalance + totalRevenue
+            val currentBalance = appDao.getCustomerBalanceFromJournal(customerId)
+            val projectedBalance = currentBalance + totalRevenue
             require(projectedBalance <= customer.creditLimit) { 
                 "Credit limit exceeded. Limit: Rs. ${customer.creditLimit}, Projected: Rs. $projectedBalance" 
             }
@@ -264,9 +277,6 @@ class AppRepository(private val appDao: AppDao) {
             date = System.currentTimeMillis(),
             description = "Revenue sale to ${customerName ?: "Cash Walk-In"} | Parchi: $parchiNumber",
             refType = "SALE",
-            amount = totalRevenue,
-            debitAccountCode = debitAccount,
-            creditAccountCode = "4000",
             customerId = customerId
         )
 
@@ -342,11 +352,6 @@ class AppRepository(private val appDao: AppDao) {
             appDao.updateProductStock(item.productSku, showroomDelta, godownDelta)
         }
 
-        // Commit customer balance update
-        if (paymentType.uppercase() == "CREDIT" && customerId != null) {
-            appDao.updateCustomerBalance(customerId, totalRevenue)
-        }
-
         return parchiNumber
     }
 
@@ -363,8 +368,10 @@ class AppRepository(private val appDao: AppDao) {
         val year = calendar.get(Calendar.YEAR)
         val month = calendar.get(Calendar.MONTH) + 1
 
-        val uniqueTag = System.currentTimeMillis() % 100000
-        val paymentNumber = "PM-$year-${month.toString().padStart(2, '0')}-${String.format("%05d", uniqueTag)}"
+        val pmPrefix = "PM-$year-${month.toString().padStart(2, '0')}"
+        val pmCount = appDao.countPaymentsInMonth(pmPrefix)
+        val pmNum = (pmCount + 1).toString().padStart(5, '0')
+        val paymentNumber = "$pmPrefix-$pmNum"
 
         val jePrefix = "JE-${year}-${month.toString().padStart(2, '0')}"
         val jeCount = appDao.countJournalEntriesInMonth(jePrefix)
@@ -372,6 +379,7 @@ class AppRepository(private val appDao: AppDao) {
         val journalEntryNumber = "$jePrefix-$jeNum"
 
         val paymentEntity = PaymentEntity(
+            paymentNumber = paymentNumber,
             customerId = customerId,
             amount = amount,
             method = when (methodAccountCode) {
@@ -389,9 +397,6 @@ class AppRepository(private val appDao: AppDao) {
             date = System.currentTimeMillis(),
             description = "Received Payment from $customerName | Notes: $notes",
             refType = "PAYMENT",
-            amount = amount,
-            debitAccountCode = methodAccountCode,
-            creditAccountCode = "1200",
             customerId = customerId
         )
 
@@ -414,9 +419,6 @@ class AppRepository(private val appDao: AppDao) {
         )
 
         appDao.insertPaymentTransaction(paymentEntity, journalEntry, journalLines)
-
-        // Decreases outstanding Khata debt on client scorecard
-        appDao.updateCustomerBalance(customerId, -amount)
 
         return paymentNumber
     }
@@ -443,10 +445,7 @@ class AppRepository(private val appDao: AppDao) {
             entryNumber = journalEntryNumber,
             date = System.currentTimeMillis(),
             description = "Paid $debitAccountName | $description",
-            refType = "EXPENSE",
-            amount = amount,
-            debitAccountCode = expenseAccountCode,
-            creditAccountCode = paymentAccountCode
+            refType = "EXPENSE"
         )
 
         val journalLines = listOf(
@@ -500,10 +499,7 @@ class AppRepository(private val appDao: AppDao) {
             entryNumber = journalEntryNumber,
             date = System.currentTimeMillis(),
             description = "Stock Transfer: $quantity pcs $productName from $fromLocation to $toLocation",
-            refType = "TRANSFER",
-            amount = transferCost,
-            debitAccountCode = toAccount,
-            creditAccountCode = fromAccount
+            refType = "TRANSFER"
         )
 
         val journalLines = listOf(
@@ -575,10 +571,7 @@ class AppRepository(private val appDao: AppDao) {
             entryNumber = journalEntryNumber,
             date = System.currentTimeMillis(),
             description = "Stock Adjustment $type: $reason",
-            refType = "ADJUSTMENT",
-            amount = cost,
-            debitAccountCode = debitAccount,
-            creditAccountCode = creditAccount
+            refType = "ADJUSTMENT"
         )
 
         val journalLines = if (type == "IN") {

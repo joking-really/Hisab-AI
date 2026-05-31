@@ -20,7 +20,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         StockMovementEntity::class
     ],
     version = 2,
-    exportSchema = false
+    exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract val appDao: AppDao
@@ -81,6 +81,7 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("""
                     CREATE TABLE IF NOT EXISTS payments (
                         id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        paymentNumber TEXT NOT NULL UNIQUE,
                         customerId INTEGER NOT NULL,
                         saleId INTEGER,
                         amount REAL NOT NULL,
@@ -93,18 +94,28 @@ abstract class AppDatabase : RoomDatabase() {
 
                 // Migrate old journal_entries: convert single-entry to line-based
                 // For each old journal entry, create 2 journal_lines (debit & credit)
-                try {
-                    db.execSQL("""
-                        INSERT INTO journal_lines (journalEntryId, accountCode, debit, credit, description)
-                        SELECT id, debitAccountCode, amount, 0.0, 'Migrated debit' FROM journal_entries
-                    """)
-                    db.execSQL("""
-                        INSERT INTO journal_lines (journalEntryId, accountCode, debit, credit, description)
-                        SELECT id, creditAccountCode, 0.0, amount, 'Migrated credit' FROM journal_entries
-                    """)
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
+                db.execSQL("""
+                    INSERT INTO journal_lines (journalEntryId, accountCode, debit, credit, description)
+                    SELECT 
+                        id, 
+                        COALESCE(debitAccountCode, 'UNKNOWN') as accountCode, 
+                        COALESCE(amount, 0.0) as debit, 
+                        0.0 as credit, 
+                        'Migrated debit (fallback)' as description 
+                    FROM journal_entries
+                    WHERE debitAccountCode IS NOT NULL
+                """)
+                db.execSQL("""
+                    INSERT INTO journal_lines (journalEntryId, accountCode, debit, credit, description)
+                    SELECT 
+                        id, 
+                        COALESCE(creditAccountCode, 'UNKNOWN') as accountCode, 
+                        0.0 as debit, 
+                        COALESCE(amount, 0.0) as credit, 
+                        'Migrated credit (fallback)' as description 
+                    FROM journal_entries
+                    WHERE creditAccountCode IS NOT NULL
+                """)
 
                 // Remove old columns from journal_entries
                 // (SQLite doesn't support DROP COLUMN easily; create new table and swap)
@@ -121,14 +132,10 @@ abstract class AppDatabase : RoomDatabase() {
                 """)
                 db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_journal_entries_new_entryNumber ON journal_entries_new(entryNumber)")
                 
-                try {
-                    db.execSQL("""
-                        INSERT INTO journal_entries_new (id, entryNumber, date, description, refType, refId, customerId)
-                        SELECT id, entryNumber, date, description, refType, NULL as refId, customerId FROM journal_entries
-                    """)
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
+                db.execSQL("""
+                    INSERT INTO journal_entries_new (id, entryNumber, date, description, refType, refId, customerId)
+                    SELECT id, entryNumber, date, description, refType, NULL as refId, customerId FROM journal_entries
+                """)
                 
                 db.execSQL("DROP TABLE IF EXISTS journal_entries")
                 db.execSQL("ALTER TABLE journal_entries_new RENAME TO journal_entries")
@@ -142,14 +149,10 @@ abstract class AppDatabase : RoomDatabase() {
                         nameUrdu TEXT
                     )
                 """)
-                try {
-                    db.execSQL("""
-                        INSERT INTO accounts_new (code, name, type, nameUrdu)
-                        SELECT code, name, type, NULL as nameUrdu FROM accounts
-                    """)
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
+                db.execSQL("""
+                    INSERT INTO accounts_new (code, name, type, nameUrdu)
+                    SELECT code, name, type, NULL as nameUrdu FROM accounts
+                """)
                 db.execSQL("DROP TABLE IF EXISTS accounts")
                 db.execSQL("ALTER TABLE accounts_new RENAME TO accounts")
             }

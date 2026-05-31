@@ -30,8 +30,9 @@ class GroqService {
         .writeTimeout(60, TimeUnit.SECONDS)
         .build()
 
-    // Using Groq API Key
-    private val apiKey = BuildConfig.GROQ_API_KEY
+    // Using Supabase Edge proxy URLs
+    private val supabaseUrl = BuildConfig.SUPABASE_URL
+    private val supabaseAnonKey = BuildConfig.SUPABASE_ANON_KEY
 
     // Models requested by the user
     private val chatModelName = "llama-3.3-70b-versatile"
@@ -49,8 +50,8 @@ class GroqService {
         products: List<ProductEntity>,
         toolExecutor: suspend (String, Map<String, Any>) -> String
     ): String = withContext(Dispatchers.IO) {
-        if (apiKey.isEmpty() || apiKey == "MY_GROQ_API_KEY") {
-            return@withContext "API Key missing or set to placeholder. Please configure your GROQ_API_KEY in the Secrets / .env panel to enable Hisab Assistant AI."
+        if (supabaseUrl.isEmpty() || supabaseAnonKey.isEmpty() || supabaseUrl == "https://your-project-ref.supabase.co") {
+            return@withContext "Supabase credentials missing or set to placeholder. Please configure your SUPABASE_URL and SUPABASE_ANON_KEY in the Secrets panel to enable Hisab Assistant AI."
         }
 
         val systemInstructionText = """
@@ -251,8 +252,8 @@ class GroqService {
         val requestBody = requestBodyJson.toString().toRequestBody(mediaType)
 
         val request = Request.Builder()
-            .url("https://api.groq.com/openai/v1/chat/completions")
-            .header("Authorization", "Bearer $apiKey")
+            .url("$supabaseUrl/functions/v1/groq-chat")
+            .header("Authorization", "Bearer $supabaseAnonKey")
             .post(requestBody)
             .build()
 
@@ -310,8 +311,8 @@ class GroqService {
                         }
                         val requestFinalBody = requestFinalBodyJson.toString().toRequestBody(mediaType)
                         val finalReq = Request.Builder()
-                            .url("https://api.groq.com/openai/v1/chat/completions")
-                            .header("Authorization", "Bearer $apiKey")
+                            .url("$supabaseUrl/functions/v1/groq-chat")
+                            .header("Authorization", "Bearer $supabaseAnonKey")
                             .post(requestFinalBody)
                             .build()
 
@@ -352,8 +353,8 @@ class GroqService {
         val requestBody = requestBodyJson.toString().toRequestBody(mediaType)
 
         val request = Request.Builder()
-            .url("https://api.groq.com/openai/v1/chat/completions")
-            .header("Authorization", "Bearer $apiKey")
+            .url("$supabaseUrl/functions/v1/groq-chat")
+            .header("Authorization", "Bearer $supabaseAnonKey")
             .post(requestBody)
             .build()
 
@@ -380,8 +381,8 @@ class GroqService {
         imageBitmap: Bitmap,
         products: List<ProductEntity>
     ): String = withContext(Dispatchers.IO) {
-        if (apiKey.isEmpty() || apiKey == "MY_GROQ_API_KEY") {
-            return@withContext "{\"error\": \"API Key missing. Configure in .env file.\"}"
+        if (supabaseUrl.isEmpty() || supabaseAnonKey.isEmpty() || supabaseUrl == "https://your-project-ref.supabase.co") {
+            return@withContext "{\"error\": \"Supabase credentials missing. Configure in .env file.\"}"
         }
 
         // 1. Preprocess then run on-device local text recognition

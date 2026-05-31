@@ -19,9 +19,11 @@ data class CustomerEntity(
     val address: String,
     val creditLimit: Double = 50000.0,
     val paymentTermsDays: Int = 30,
-    val runningBalance: Double = 0.0,
     val riskScore: Double = 3.0 // 1-10 risk rating
-)
+) {
+    @Ignore
+    var runningBalance: Double = 0.0
+}
 
 @Entity(tableName = "products")
 data class ProductEntity(
@@ -45,12 +47,13 @@ data class JournalEntryEntity(
     val date: Long = System.currentTimeMillis(),
     val description: String,
     val refType: String, // SALE, PAYMENT, EXPENSE, PURCHASE, STOCK_IN, TRANSFER, ADJUSTMENT
-    val amount: Double = 0.0,
-    val debitAccountCode: String = "",
-    val creditAccountCode: String = "",
     val refId: Long? = null,
     val customerId: Int? = null
-)
+) {
+    @Ignore var amount: Double = 0.0
+    @Ignore var debitAccountCode: String = ""
+    @Ignore var creditAccountCode: String = ""
+}
 
 @Entity(
     tableName = "journal_lines",
@@ -112,6 +115,7 @@ data class SaleItemEntity(
 @Entity(tableName = "payments")
 data class PaymentEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val paymentNumber: String,           // ← ADD THIS
     val customerId: Int,
     val saleId: Long? = null,          // Optional: payment against specific sale
     val amount: Double,
