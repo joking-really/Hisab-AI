@@ -686,7 +686,7 @@ class GroqService {
         toolExecutor: suspend (String, Map<String, Any>) -> String
     ): String = withContext(Dispatchers.IO) {
         val apiKey = BuildConfig.GEMINI_API_KEY
-        val modelName = "gemini-3.5-flash"
+        val modelName = "gemini-1.5-flash"
         val url = "https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent?key=$apiKey"
 
         val contents = JSONArray()
@@ -853,7 +853,7 @@ class GroqService {
         asJson: Boolean = false
     ): String = withContext(Dispatchers.IO) {
         val apiKey = BuildConfig.GEMINI_API_KEY
-        val modelName = "gemini-3.5-flash"
+        val modelName = "gemini-1.5-flash"
         val url = "https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent?key=$apiKey"
 
         val contents = JSONArray().apply {

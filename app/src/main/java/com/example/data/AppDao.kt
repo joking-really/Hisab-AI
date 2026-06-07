@@ -17,7 +17,10 @@ interface AppDao {
             a.code, a.name, a.type,
             COALESCE(SUM(jl.debit), 0.0) as totalDebit,
             COALESCE(SUM(jl.credit), 0.0) as totalCredit,
-            (COALESCE(SUM(jl.debit), 0.0) - COALESCE(SUM(jl.credit), 0.0)) as balance,
+            CASE 
+                WHEN a.type IN ('ASSET', 'EXPENSE') THEN (COALESCE(SUM(jl.debit), 0.0) - COALESCE(SUM(jl.credit), 0.0))
+                ELSE (COALESCE(SUM(jl.credit), 0.0) - COALESCE(SUM(jl.debit), 0.0))
+            END as balance,
             a.nameUrdu
         FROM accounts a
         LEFT JOIN journal_lines jl ON a.code = jl.accountCode
