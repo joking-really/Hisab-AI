@@ -10,6 +10,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.ai.GroqService
 import com.example.data.*
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -38,6 +40,15 @@ class HisabViewModel(application: Application) : AndroidViewModel(application) {
     private val db = AppDatabase.getDatabase(application)
     private val repo = AppRepository(db.appDao)
     private val groqService = GroqService()
+
+    private val _toastEvents = MutableSharedFlow<String>()
+    val toastEvents = _toastEvents.asSharedFlow()
+
+    fun showToast(message: String) {
+        viewModelScope.launch {
+            _toastEvents.emit(message)
+        }
+    }
 
     // Database flows
     val accounts: StateFlow<List<AccountBalanceView>> = repo.getTrialBalance(null, null).stateIn(
@@ -80,7 +91,7 @@ class HisabViewModel(application: Application) : AndroidViewModel(application) {
     var ocrResultOcrJson by mutableStateOf<String?>(null)
     var ocrCustomerName by mutableStateOf("")
     var ocrPaymentType by mutableStateOf("CREDIT")
-    var ocrItems = mutableStateOf<List<SaleItem>>(emptyList())
+    var ocrItems by mutableStateOf<List<SaleItem>>(emptyList())
     var ocrTotal by mutableStateOf(0.0)
     var ocrConfidence by mutableStateOf(1.0)
 
@@ -104,11 +115,11 @@ class HisabViewModel(application: Application) : AndroidViewModel(application) {
     init {
         viewModelScope.launch {
             repo.preseedAccounts()
-            preseedShoroomProductsAndCustomers()
+            preseedShowroomProductsAndCustomers()
         }
     }
 
-    private suspend fun preseedShoroomProductsAndCustomers() {
+    private suspend fun preseedShowroomProductsAndCustomers() {
         val currentPd = repo.allProducts.first()
         if (currentPd.isEmpty()) {
             repo.addProduct(
@@ -306,49 +317,81 @@ class HisabViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun safeLaunch(block: suspend kotlinx.coroutines.CoroutineScope.() -> Unit) {
+        viewModelScope.launch {
+            try {
+                block()
+            } catch (e: Exception) {
+                showToast("Urgent Error: ${e.message}")
+            } catch (e: Throwable) {
+                showToast("Critical System Error: ${e.message}")
+            }
+        }
+    }
+
+    fun exportBackup(uri: android.net.Uri) {
+        safeLaunch {
+            getApplication<Application>().contentResolver.openOutputStream(uri)?.use { output ->
+                val dbFile = getApplication<Application>().getDatabasePath("app_database")
+                if (dbFile.exists()) {
+                    dbFile.inputStream().use { input ->
+                        input.copyTo(output)
+                    }
+                    showToast("Backups exported successfully!")
+                } else {
+                    showToast("Active database not found for backing up")
+                }
+            }
+        }
+    }
+
     // Ledger Write Methods
     fun addNewCustomer(name: String, shopName: String, phone: String, address: String, creditLimit: Double, terms: Int) {
-        viewModelScope.launch {
+        safeLaunch {
             repo.addCustomer(name, shopName, phone, address, creditLimit, terms)
+            showToast("Mister $name registered successfully!")
         }
     }
 
     fun addNewProduct(sku: String, name: String, brand: String, category: String, variant: String, unitCost: Double, salePrice: Double, reorderLevel: Int, initShowroomQty: Int, initGodownQty: Int) {
-        viewModelScope.launch {
+        safeLaunch {
             repo.addProduct(sku, name, brand, category, variant, unitCost, salePrice, reorderLevel, initShowroomQty, initGodownQty)
+            showToast("Product $name ($sku) registered successfully!")
         }
     }
 
     fun executeSale(customerId: Int?, customerName: String?, items: List<SaleItem>, paymentType: String, paymentAccountCode: String, onFinished: (String) -> Unit) {
-        viewModelScope.launch {
+        safeLaunch {
             val invoiceNum = repo.recordSale(customerId, customerName, items, paymentType, paymentAccountCode)
             onFinished(invoiceNum)
         }
     }
 
     fun executePayment(customerId: Int, customerName: String, amount: Double, methodAccountCode: String, notes: String, onFinished: (String) -> Unit) {
-        viewModelScope.launch {
+        safeLaunch {
             val transNum = repo.recordPayment(customerId, customerName, amount, methodAccountCode, notes)
             onFinished(transNum)
         }
     }
 
     fun executeExpense(expenseAccountCode: String, debitAccountName: String, amount: Double, paymentAccountCode: String, description: String, onFinished: (String) -> Unit) {
-        viewModelScope.launch {
+        safeLaunch {
             val transNum = repo.recordExpense(expenseAccountCode, debitAccountName, amount, paymentAccountCode, description)
             onFinished(transNum)
         }
     }
 
     fun executeStockTransfer(productSku: String, productName: String, quantity: Int, fromLocation: String, toLocation: String) {
-        viewModelScope.launch {
+        safeLaunch {
             repo.recordStockTransfer(productSku, productName, quantity, fromLocation, toLocation)
+            showToast("Stock transfer complete: $quantity pcs of $productName")
         }
     }
 
     fun executeStockAdjustment(productSku: String, productName: String, quantity: Int, location: String, type: String, reason: String) {
-        viewModelScope.launch {
+        safeLaunch {
             repo.recordManualAdjustment(productSku, productName, quantity, location, type, reason)
+            showToast("Stock adjustment logged: $quantity pcs at $location")
         }
     }
 
@@ -427,90 +470,95 @@ class HisabViewModel(application: Application) : AndroidViewModel(application) {
         chatSuggestedAction = null
 
         viewModelScope.launch {
-            val actionType = suggested.optString("suggestedAction")
-            val details = suggested.optString("details", "")
-            val amount = suggested.optDouble("amount", 0.0)
+            try {
+                val actionType = suggested.optString("suggestedAction")
+                val details = suggested.optString("details", "")
+                val amount = suggested.optDouble("amount", 0.0)
 
-            when (actionType) {
-                "RECORD_SALE" -> {
-                    val custName = suggested.optString("customerName", "Cash Walk-In")
-                    val custId = suggested.optInt("customerId", -1)
-                    val jsonItems = suggested.optJSONArray("items")
-                    val saleItemsList = mutableListOf<SaleItem>()
+                when (actionType) {
+                    "RECORD_SALE" -> {
+                        val custName = suggested.optString("customerName", "Cash Walk-In")
+                        val custId = suggested.optInt("customerId", -1)
+                        val jsonItems = suggested.optJSONArray("items")
+                        val saleItemsList = mutableListOf<SaleItem>()
 
-                    if (jsonItems != null) {
-                        for (i in 0 until jsonItems.length()) {
-                            val jo = jsonItems.getJSONObject(i)
-                            val sku = jo.getString("sku")
-                            val name = jo.optString("productName", "Product")
-                            val qty = jo.getInt("quantity")
-                            val rate = jo.optDouble("rate", 0.0)
-                            val loc = jo.optString("fromLocation", "GODOWN")
+                        if (jsonItems != null) {
+                            for (i in 0 until jsonItems.length()) {
+                                val jo = jsonItems.getJSONObject(i)
+                                val sku = jo.getString("sku")
+                                val name = jo.optString("productName", "Product")
+                                val qty = jo.getInt("quantity")
+                                val rate = jo.optDouble("rate", 0.0)
+                                val loc = jo.optString("fromLocation", "GODOWN")
 
-                            val cost = repo.getProductBySku(sku)?.unitCost ?: 0.0
-                            saleItemsList.add(
-                                SaleItem(
-                                    productSku = sku,
-                                    productName = name,
-                                    quantity = qty,
-                                    salePriceOnParchi = rate,
-                                    costPriceAtTime = cost,
-                                    fromLocation = loc
+                                val cost = repo.getProductBySku(sku)?.unitCost ?: 0.0
+                                saleItemsList.add(
+                                    SaleItem(
+                                        productSku = sku,
+                                        productName = name,
+                                        quantity = qty,
+                                        salePriceOnParchi = rate,
+                                        costPriceAtTime = cost,
+                                        fromLocation = loc
+                                    )
                                 )
+                            }
+                        }
+
+                        if (saleItemsList.isNotEmpty()) {
+                            val isCredit = custId != -1
+                            val payAccount = if (isCredit) "1200" else suggested.optString("paymentAccountCode", "1000")
+                            val code = repo.recordSale(
+                                customerId = if (isCredit) custId else null,
+                                customerName = custName,
+                                items = saleItemsList,
+                                paymentType = if (isCredit) "CREDIT" else "CASH",
+                                paymentAccountCode = payAccount
                             )
+                            onNotification("Parchi generated successfully: $code")
+                        } else {
+                            onNotification("Could not record sale: No valid items found in suggestion.")
                         }
                     }
-
-                    if (saleItemsList.isNotEmpty()) {
-                        val isCredit = custId != -1
-                        val code = repo.recordSale(
-                            customerId = if (isCredit) custId else null,
-                            customerName = custName,
-                            items = saleItemsList,
-                            paymentType = if (isCredit) "CREDIT" else "CASH",
-                            paymentAccountCode = "1000"
-                        )
-                        onNotification("Parchi generated successfully: $code")
-                    } else {
-                        onNotification("Could not record sale: No valid items found in suggestion.")
+                    "RECORD_PAYMENT" -> {
+                        val custId = suggested.optInt("customerId", -1)
+                        val custName = suggested.optString("customerName", "Customer")
+                        val payMethod = suggested.optString("paymentAccountCode", "1000")
+                        if (custId != -1 && amount > 0) {
+                            val code = repo.recordPayment(
+                                customerId = custId,
+                                customerName = custName,
+                                amount = amount,
+                                methodAccountCode = payMethod,
+                                notes = "AI Auto-recorded: $details"
+                            )
+                            onNotification("Payment receipt logged: $code")
+                        }
+                    }
+                    "RECORD_EXPENSE" -> {
+                        val expCode = suggested.optString("expenseCode", "5200")
+                        val payMethod = suggested.optString("paymentAccountCode", "1000")
+                        val label = when(expCode) {
+                            "5100" -> "Shop Rent"
+                            "5200" -> "Utilities"
+                            "5300" -> "Transport/Delivery"
+                            "5400" -> "Staff Salaries"
+                            else -> "Shop Expense"
+                        }
+                        if (amount > 0) {
+                            val code = repo.recordExpense(
+                                expenseAccountCode = expCode,
+                                debitAccountName = label,
+                                amount = amount,
+                                paymentAccountCode = payMethod,
+                                description = details
+                            )
+                            onNotification("Expense recorded: $code")
+                        }
                     }
                 }
-                "RECORD_PAYMENT" -> {
-                    val custId = suggested.optInt("customerId", -1)
-                    val custName = suggested.optString("customerName", "Customer")
-                    val payMethod = suggested.optString("paymentAccountCode", "1000")
-                    if (custId != -1 && amount > 0) {
-                        val code = repo.recordPayment(
-                            customerId = custId,
-                            customerName = custName,
-                            amount = amount,
-                            methodAccountCode = payMethod,
-                            notes = "AI Auto-recorded: $details"
-                        )
-                        onNotification("Payment receipt logged: $code")
-                    }
-                }
-                "RECORD_EXPENSE" -> {
-                    val expCode = suggested.optString("expenseCode", "5200")
-                    val payMethod = suggested.optString("paymentAccountCode", "1000")
-                    val label = when(expCode) {
-                        "5100" -> "Shop Rent"
-                        "5200" -> "Utilities"
-                        "5300" -> "Transport/Delivery"
-                        "5400" -> "Staff Salaries"
-                        else -> "Shop Expense"
-                    }
-                    if (amount > 0) {
-                        val code = repo.recordExpense(
-                            expenseAccountCode = expCode,
-                            debitAccountName = label,
-                            amount = amount,
-                            paymentAccountCode = payMethod,
-                            description = details
-                        )
-                        onNotification("Expense recorded: $code")
-                    }
-                }
+            } catch (e: Exception) {
+                onNotification("AI Action application failed: ${e.message}")
             }
         }
     }
@@ -558,7 +606,7 @@ class HisabViewModel(application: Application) : AndroidViewModel(application) {
                         )
                     }
                 }
-                ocrItems.value = parsedItems
+                ocrItems = parsedItems
             } catch (e: Exception) {
                 Log.e("HisabViewModel", "Failed to parse OCR return JSON: ${e.message}")
             }
@@ -568,7 +616,7 @@ class HisabViewModel(application: Application) : AndroidViewModel(application) {
     fun clearOcrState() {
         scannedBitmap = null
         ocrResultOcrJson = null
-        ocrItems.value = emptyList<SaleItem>()
+        ocrItems = emptyList<SaleItem>()
         ocrCustomerName = ""
         ocrTotal = 0.0
         ocrConfidence = 1.0

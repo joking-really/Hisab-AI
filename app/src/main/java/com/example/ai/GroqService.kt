@@ -42,26 +42,44 @@ class GroqService {
     private val chatModelFallback = "llama3-70b-8192"
     private val ocrModelFallback = "llama-3.1-8b-instant"
 
-    private fun getActiveStrategy(): String {
-        val hasSupabase = try {
+    private fun isSupabaseConfigured(): Boolean {
+        return try {
             BuildConfig.SUPABASE_URL.isNotEmpty() && 
             BuildConfig.SUPABASE_URL != "https://your-project-ref.supabase.co" && 
             BuildConfig.SUPABASE_ANON_KEY.isNotEmpty() && 
-            !BuildConfig.SUPABASE_ANON_KEY.startsWith("eyJhbGciOiJIUzI1NiIs")
+            BuildConfig.SUPABASE_ANON_KEY != "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiJ9.example_placeholder" &&
+            !BuildConfig.SUPABASE_ANON_KEY.startsWith("YOUR_")
         } catch (e: Throwable) {
             false
         }
+    }
 
-        val hasGroq = try {
+    private fun isGroqConfigured(): Boolean {
+        return try {
             BuildConfig.GROQ_API_KEY.isNotEmpty() && 
-            BuildConfig.GROQ_API_KEY != "MY_GROQ_API_KEY"
+            BuildConfig.GROQ_API_KEY != "MY_GROQ_API_KEY" &&
+            BuildConfig.GROQ_API_KEY != "YOUR_GROQ_API_KEY_HERE" &&
+            !BuildConfig.GROQ_API_KEY.startsWith("YOUR_")
         } catch (e: Throwable) {
             false
         }
+    }
 
+    private fun isGeminiConfigured(): Boolean {
+        return try {
+            BuildConfig.GEMINI_API_KEY.isNotEmpty() &&
+            BuildConfig.GEMINI_API_KEY != "GEMINI_API_KEY" &&
+            BuildConfig.GEMINI_API_KEY != "YOUR_GEMINI_API_KEY_HERE" &&
+            !BuildConfig.GEMINI_API_KEY.startsWith("YOUR_")
+        } catch (e: Throwable) {
+            false
+        }
+    }
+
+    private fun getActiveStrategy(): String {
         return when {
-            hasSupabase -> "SUPABASE_PROXY"
-            hasGroq -> "GROQ_DIRECT"
+            isSupabaseConfigured() -> "SUPABASE_PROXY"
+            isGroqConfigured() -> "GROQ_DIRECT"
             else -> "GEMINI_DIRECT"
         }
     }
@@ -76,6 +94,10 @@ class GroqService {
     ): String = withContext(Dispatchers.IO) {
         val preferredStrategy = getActiveStrategy()
         Log.d("GroqService", "Preferred chat strategy: $preferredStrategy")
+
+        if (preferredStrategy == "GEMINI_DIRECT" && !isGeminiConfigured()) {
+            return@withContext "⚠️ **AI Copilot Key is Not Configured**\n\nThe smart accounting assistant features are currently inactive because your API keys are missing or unconfigured.\n\nTo activate your Urdu/English-speaking digital ledger copilot and scan receipts, please:\n\n1. Locate the **Secrets 🔑 Key** tab or panel in the Google AI Studio interface.\n2. Add a new secret named **`GEMINI_API_KEY`** (or **`GROQ_API_KEY`**) and paste your actual API credentials.\n3. The applet will rebuild and sync, immediately activating your smart digital ledger auto-copilot!"
+        }
 
         val systemInstructionText = """
             You are Hisab Assistant, an AI accounting helper for a Pakistani ceramic distributor.
@@ -232,10 +254,7 @@ class GroqService {
         strategiesToTry.add(preferredStrategy)
 
         if (preferredStrategy == "SUPABASE_PROXY") {
-            val hasGroq = try {
-                BuildConfig.GROQ_API_KEY.isNotEmpty() && BuildConfig.GROQ_API_KEY != "MY_GROQ_API_KEY"
-            } catch (e: Throwable) { false }
-            if (hasGroq) {
+            if (isGroqConfigured()) {
                 strategiesToTry.add("GROQ_DIRECT")
             }
             strategiesToTry.add("GEMINI_DIRECT")
@@ -471,6 +490,10 @@ class GroqService {
         val preferredStrategy = getActiveStrategy()
         Log.d("GroqService", "Preferred OCR strategy: $preferredStrategy")
 
+        if (preferredStrategy == "GEMINI_DIRECT" && !isGeminiConfigured()) {
+            return@withContext "{\"error\": \"AI API Key is missing. Please add your GEMINI_API_KEY or GROQ_API_KEY in the Secrets panel in Google AI Studio to enable smart OCR invoice parsing features!\"}"
+        }
+
         // 1. Preprocess then run on-device local text recognition
         val preprocessed = OcrPreprocessor.preprocessImage(imageBitmap)
         val rawExtractedText = try {
@@ -532,10 +555,7 @@ class GroqService {
         strategiesToTry.add(preferredStrategy)
 
         if (preferredStrategy == "SUPABASE_PROXY") {
-            val hasGroq = try {
-                BuildConfig.GROQ_API_KEY.isNotEmpty() && BuildConfig.GROQ_API_KEY != "MY_GROQ_API_KEY"
-            } catch (e: Throwable) { false }
-            if (hasGroq) {
+            if (isGroqConfigured()) {
                 strategiesToTry.add("GROQ_DIRECT")
             }
             strategiesToTry.add("GEMINI_DIRECT")
@@ -569,11 +589,10 @@ class GroqService {
                     // Call Groq Vision OCR Model
                     val result = makeGroqApiRequest(ocrModelName, messagesArray, ocrModelFallback, forcedStrategy = strategy)
                     if (!result.startsWith("Error") && !result.contains("Requested function was not found")) {
-                        var cleanedResult = result.trim()
-                        if (cleanedResult.startsWith("```json")) { cleanedResult = cleanedResult.substring(7) }
-                        else if (cleanedResult.startsWith("```")) { cleanedResult = cleanedResult.substring(3) }
-                        if (cleanedResult.endsWith("```")) { cleanedResult = cleanedResult.substring(0, cleanedResult.length - 3) }
-                        cleanedResult = cleanedResult.trim()
+                        val cleanedResult = result.trim()
+                            .replace(Regex("^```(?:\\w+)?\\s*"), "")
+                            .replace(Regex("\\s*```$"), "")
+                            .trim()
                         return@withContext cleanedResult
                     }
                     lastError = result

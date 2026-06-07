@@ -17,7 +17,8 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         SaleEntity::class,
         SaleItemEntity::class,
         PaymentEntity::class,
-        StockMovementEntity::class
+        StockMovementEntity::class,
+        SequenceCounterEntity::class
     ],
     version = 2,
     exportSchema = true
@@ -92,6 +93,15 @@ abstract class AppDatabase : RoomDatabase() {
                     )
                 """)
 
+                // Create sequence counter table
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS sequence_counters (
+                        prefix TEXT PRIMARY KEY NOT NULL,
+                        next_value INTEGER NOT NULL DEFAULT 1
+                    )
+                """)
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_sequence_prefix ON sequence_counters(prefix)")
+
                 // Migrate old journal_entries: convert single-entry to line-based
                 // For each old journal entry, create 2 journal_lines (debit & credit)
                 db.execSQL("""
@@ -165,7 +175,6 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "hisab_ai_database"
                 )
-                    .fallbackToDestructiveMigration(true)
                     .addMigrations(MIGRATION_1_2)
                     .build()
                 INSTANCE = instance

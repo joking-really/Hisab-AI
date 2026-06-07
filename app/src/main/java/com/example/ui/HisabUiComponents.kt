@@ -55,6 +55,20 @@ fun MainAppScreen(viewModel: HisabViewModel = viewModel()) {
     val context = LocalContext.current
     var showQuickAddDialog by remember { mutableStateOf(false) }
 
+    val backupLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/octet-stream")
+    ) { uri ->
+        if (uri != null) {
+            viewModel.exportBackup(uri)
+        }
+    }
+
+    LaunchedEffect(viewModel.toastEvents) {
+        viewModel.toastEvents.collect { message ->
+            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+        }
+    }
+
     Scaffold(
         modifier = Modifier
             .fillMaxSize()
@@ -111,21 +125,43 @@ fun MainAppScreen(viewModel: HisabViewModel = viewModel()) {
                         }
                     }
 
-                    IconButton(
-                        onClick = {
-                            Toast.makeText(context, "Cloud sync complete!", Toast.LENGTH_SHORT).show()
-                        },
-                        modifier = Modifier
-                            .clip(CircleShape)
-                            .background(SlateGraySurface)
-                            .size(38.dp)
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Refresh,
-                            contentDescription = "Sync",
-                            tint = EmeraldLight,
-                            modifier = Modifier.size(18.dp)
-                        )
+                        IconButton(
+                            onClick = {
+                                backupLauncher.launch("hisab_khata_backup.db")
+                            },
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(SlateGraySurface)
+                                .size(38.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Share,
+                                contentDescription = "Backup Database",
+                                tint = EmeraldLight,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+
+                        IconButton(
+                            onClick = {
+                                Toast.makeText(context, "Cloud sync complete!", Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(SlateGraySurface)
+                                .size(38.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Refresh,
+                                contentDescription = "Sync",
+                                tint = EmeraldLight,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
                     }
                 }
                 Divider(color = SlateGrayBorder, thickness = 1.dp)
@@ -1335,7 +1371,7 @@ fun ParchiOcrScreen(viewModel: HisabViewModel) {
                         Text("Scanned items ledger summary:", fontWeight = FontWeight.Bold, color = LightText, fontSize = 12.sp)
                     }
 
-                    items(viewModel.ocrItems.value) { item: SaleItem ->
+                    items(viewModel.ocrItems) { item: SaleItem ->
                         Card(
                             colors = CardDefaults.cardColors(containerColor = SlateGraySurface),
                             border = BorderStroke(1.dp, SlateGrayBorder)
@@ -1365,7 +1401,7 @@ fun ParchiOcrScreen(viewModel: HisabViewModel) {
                                     viewModel.executeSale(
                                         customerId = match?.id,
                                         customerName = viewModel.ocrCustomerName,
-                                        items = viewModel.ocrItems.value,
+                                        items = viewModel.ocrItems,
                                         paymentType = viewModel.ocrPaymentType.trim().uppercase(),
                                         paymentAccountCode = "1000"
                                     ) { doc ->

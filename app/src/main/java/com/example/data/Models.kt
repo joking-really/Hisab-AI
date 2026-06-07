@@ -25,9 +25,13 @@ data class CustomerEntity(
     var runningBalance: Double = 0.0
 }
 
-@Entity(tableName = "products")
+@Entity(
+    tableName = "products",
+    indices = [Index(value = ["sku"], unique = true)]
+)
 data class ProductEntity(
-    @PrimaryKey val sku: String,
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val sku: String,
     val name: String,
     val brand: String,
     val category: String,
@@ -145,4 +149,20 @@ data class AccountBalanceView(
     val totalDebit: Double,
     val totalCredit: Double,
     val balance: Double
+)
+
+data class StockUpdate(
+    val sku: String,
+    val showroomDelta: Int,
+    val godownDelta: Int
+)
+
+enum class PaymentMethod {
+    CASH, BANK_TRANSFER, EASYPAISA, JAZZCASH
+}
+
+@Entity(tableName = "sequence_counters")
+data class SequenceCounterEntity(
+    @PrimaryKey val prefix: String,
+    @ColumnInfo(name = "next_value") val nextValue: Int
 )

@@ -17,33 +17,22 @@ data class SaleItem(
 class AppRepository(private val appDao: AppDao) {
 
     val allAccounts: Flow<List<AccountEntity>> = appDao.getAllAccounts()
-    val allCustomers: Flow<List<CustomerEntity>> = appDao.getAllCustomers().map { customerList ->
-        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            customerList.map { customer ->
-                val balance = appDao.getCustomerBalanceFromJournal(customer.id)
-                customer.apply { runningBalance = balance }
-            }
-        }
-    }
+    val allCustomers: Flow<List<CustomerEntity>> = appDao.getAllCustomersWithBalance()
     val allProducts: Flow<List<ProductEntity>> = appDao.getAllProducts()
-    val allJournalEntries: Flow<List<JournalEntryEntity>> = appDao.getAllJournalEntries().map { entryList ->
-        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            entryList.map { entry ->
-                val lines = appDao.getJournalLinesForEntry(entry.id)
-                val totalAmount = lines.sumOf { it.debit }
-                val firstDebit = lines.firstOrNull { it.debit > 0 }?.accountCode ?: ""
-                val firstCredit = lines.firstOrNull { it.credit > 0 }?.accountCode ?: ""
-                entry.apply {
-                    amount = totalAmount
-                    debitAccountCode = firstDebit
-                    creditAccountCode = firstCredit
-                }
-            }
-        }
-    }
+    val allJournalEntries: Flow<List<JournalEntryEntity>> = appDao.getAllJournalEntriesWithLineSummaries()
     val allStockMovements: Flow<List<StockMovementEntity>> = appDao.getAllStockMovements()
     val allSales: Flow<List<SaleEntity>> = appDao.getAllSales()
     val allPayments: Flow<List<PaymentEntity>> = appDao.getAllPayments()
+
+    private suspend fun validateTrialBalance(message: String) {
+        val accounts = appDao.getTrialBalance(null, null).first()
+        val totalDr = accounts.filter { it.type in listOf("ASSET", "EXPENSE") }.sumOf { it.balance }
+        val totalCr = accounts.filter { it.type in listOf("LIABILITY", "EQUITY", "INCOME") }.sumOf { it.balance }
+        val diff = kotlin.math.abs(totalDr - totalCr)
+        if (diff > 0.01) {
+            throw IllegalStateException("CRITICAL [$message]: Trial balance unbalanced! Dr=$totalDr Cr=$totalCr Diff=$diff")
+        }
+    }
 
     suspend fun getProductBySku(sku: String): ProductEntity? = appDao.getProductBySku(sku)
 
@@ -69,6 +58,7 @@ class AppRepository(private val appDao: AppDao) {
                 // EQUITY
                 AccountEntity("3000", "Owner's Capital", "EQUITY", "سرمایہ مالک"),
                 AccountEntity("3100", "Retained Earnings", "EQUITY", "منافع جمع شدہ"),
+                AccountEntity("3900", "Stock Adjustment Reserve", "EQUITY", "اسٹاک ایڈجسٹمنٹ"),
                 
                 // INCOME
                 AccountEntity("4000", "Sales Revenue", "INCOME", "آمدنی فروخت"),
@@ -141,6 +131,7 @@ class AppRepository(private val appDao: AppDao) {
         }
 
         val product = ProductEntity(
+            id = 0,
             sku = sku,
             name = name,
             brand = brand,
@@ -161,8 +152,8 @@ class AppRepository(private val appDao: AppDao) {
             val year = calendar.get(Calendar.YEAR)
             val month = calendar.get(Calendar.MONTH) + 1
             val jePrefix = "JE-${year}-${month.toString().padStart(2, '0')}"
-            val count = appDao.countJournalEntriesInMonth(jePrefix)
-            val jeNum = (count + 1).toString().padStart(5, '0')
+            appDao.incrementSequence(jePrefix)
+            val jeNum = appDao.getNextSequence(jePrefix)?.toString()?.padStart(5, '0') ?: "00001"
             val entryNumber = "$jePrefix-$jeNum"
 
             val entry = JournalEntryEntity(
@@ -183,8 +174,8 @@ class AppRepository(private val appDao: AppDao) {
             val year = calendar.get(Calendar.YEAR)
             val month = calendar.get(Calendar.MONTH) + 1
             val jePrefix = "JE-${year}-${month.toString().padStart(2, '0')}"
-            val count = appDao.countJournalEntriesInMonth(jePrefix)
-            val jeNum = (count + 1).toString().padStart(5, '0')
+            appDao.incrementSequence(jePrefix)
+            val jeNum = appDao.getNextSequence(jePrefix)?.toString()?.padStart(5, '0') ?: "00001"
             val entryNumber = "$jePrefix-$jeNum"
 
             val entry = JournalEntryEntity(
@@ -199,14 +190,15 @@ class AppRepository(private val appDao: AppDao) {
             )
             appDao.insertGenericTransaction(entry, lines)
         }
+        validateTrialBalance("AddProduct")
     }
 
     suspend fun recordSale(
         customerId: Int?,
         customerName: String?,
         items: List<SaleItem>,
-        paymentType: String, // CASH, CREDIT
-        paymentAccountCode: String // 1000, 1010, 1020 (used if CASH)
+        paymentType: String, // CASH or CREDIT
+        paymentAccountCode: String // ONLY used when paymentType is CASH. Ignored for CREDIT (uses "1200")
     ): String {
         // Validation Layer
         require(items.isNotEmpty()) { "Sale must contain at least 1 item" }
@@ -234,19 +226,28 @@ class AppRepository(private val appDao: AppDao) {
             }
         }
 
+        // Double-check: no negative stock after this sale
+        for (item in items) {
+            val product = appDao.getProductBySku(item.productSku) ?: continue
+            val finalShowroom = product.showroomQty + (if (item.fromLocation.uppercase() == "SHOWROOM") -item.quantity else 0)
+            val finalGodown = product.godownQty + (if (item.fromLocation.uppercase() == "GODOWN") -item.quantity else 0)
+            require(finalShowroom >= 0) { "Showroom stock for ${product.name} would go negative ($finalShowroom)" }
+            require(finalGodown >= 0) { "Godown stock for ${product.name} would go negative ($finalGodown)" }
+        }
+
         // Unique Parchi & Journal Entry numbers (collision-safe, sequential monthly)
         val calendar = Calendar.getInstance()
         val year = calendar.get(Calendar.YEAR)
         val month = calendar.get(Calendar.MONTH) + 1
         
         val sPrefix = "PAR-${year}-${month.toString().padStart(2, '0')}"
-        val sCount = appDao.countSalesInMonth(sPrefix)
-        val sNum = (sCount + 1).toString().padStart(5, '0')
+        appDao.incrementSequence(sPrefix)
+        val sNum = appDao.getNextSequence(sPrefix)?.toString()?.padStart(5, '0') ?: "00001"
         val parchiNumber = "$sPrefix-$sNum"
 
         val jePrefix = "JE-${year}-${month.toString().padStart(2, '0')}"
-        val jeCount = appDao.countJournalEntriesInMonth(jePrefix)
-        val jeNum = (jeCount + 1).toString().padStart(5, '0')
+        appDao.incrementSequence(jePrefix)
+        val jeNum = appDao.getNextSequence(jePrefix)?.toString()?.padStart(5, '0') ?: "00001"
         val journalEntryNumber = "$jePrefix-$jeNum"
 
         // Generate entities for saving
@@ -336,21 +337,23 @@ class AppRepository(private val appDao: AppDao) {
             )
         }
 
-        // Execute Transaction
+        val stockUpdates = items.map { item ->
+            val showroomDelta = if (item.fromLocation.uppercase() == "SHOWROOM") -item.quantity else 0
+            val godownDelta = if (item.fromLocation.uppercase() == "GODOWN") -item.quantity else 0
+            StockUpdate(item.productSku, showroomDelta, godownDelta)
+        }
+
+        // All-or-nothing transaction: journal + sale + items + stock movements + stock updates
         appDao.insertSaleTransaction(
             sale = saleEntity,
             items = saleItemEntities,
             journalEntry = journalEntry,
             journalLines = journalLines,
-            stockMovements = stockMovements
+            stockMovements = stockMovements,
+            stockUpdates = stockUpdates
         )
 
-        // Commit stock updates in stock table (reconciles numbers inside VM safely)
-        for (item in items) {
-            val showroomDelta = if (item.fromLocation.uppercase() == "SHOWROOM") -item.quantity else 0
-            val godownDelta = if (item.fromLocation.uppercase() == "GODOWN") -item.quantity else 0
-            appDao.updateProductStock(item.productSku, showroomDelta, godownDelta)
-        }
+        validateTrialBalance("Sale")
 
         return parchiNumber
     }
@@ -369,13 +372,13 @@ class AppRepository(private val appDao: AppDao) {
         val month = calendar.get(Calendar.MONTH) + 1
 
         val pmPrefix = "PM-$year-${month.toString().padStart(2, '0')}"
-        val pmCount = appDao.countPaymentsInMonth(pmPrefix)
-        val pmNum = (pmCount + 1).toString().padStart(5, '0')
+        appDao.incrementSequence(pmPrefix)
+        val pmNum = appDao.getNextSequence(pmPrefix)?.toString()?.padStart(5, '0') ?: "00001"
         val paymentNumber = "$pmPrefix-$pmNum"
 
         val jePrefix = "JE-${year}-${month.toString().padStart(2, '0')}"
-        val jeCount = appDao.countJournalEntriesInMonth(jePrefix)
-        val jeNum = (jeCount + 1).toString().padStart(5, '0')
+        appDao.incrementSequence(jePrefix)
+        val jeNum = appDao.getNextSequence(jePrefix)?.toString()?.padStart(5, '0') ?: "00001"
         val journalEntryNumber = "$jePrefix-$jeNum"
 
         val paymentEntity = PaymentEntity(
@@ -420,6 +423,8 @@ class AppRepository(private val appDao: AppDao) {
 
         appDao.insertPaymentTransaction(paymentEntity, journalEntry, journalLines)
 
+        validateTrialBalance("Payment")
+
         return paymentNumber
     }
 
@@ -437,8 +442,8 @@ class AppRepository(private val appDao: AppDao) {
         val month = calendar.get(Calendar.MONTH) + 1
 
         val jePrefix = "JE-${year}-${month.toString().padStart(2, '0')}"
-        val jeCount = appDao.countJournalEntriesInMonth(jePrefix)
-        val jeNum = (jeCount + 1).toString().padStart(5, '0')
+        appDao.incrementSequence(jePrefix)
+        val jeNum = appDao.getNextSequence(jePrefix)?.toString()?.padStart(5, '0') ?: "00001"
         val journalEntryNumber = "$jePrefix-$jeNum"
 
         val journalEntry = JournalEntryEntity(
@@ -466,6 +471,9 @@ class AppRepository(private val appDao: AppDao) {
         )
 
         appDao.insertGenericTransaction(journalEntry, journalLines)
+
+        validateTrialBalance("Expense")
+
         return journalEntryNumber
     }
 
@@ -473,8 +481,8 @@ class AppRepository(private val appDao: AppDao) {
         productSku: String,
         productName: String,
         quantity: Int,
-        fromLocation: String, // GODOWN, SHOWROOM
-        toLocation: String   // GODOWN, SHOWROOM
+        fromLocation: String,
+        toLocation: String
     ) {
         val currentProduct = appDao.getProductBySku(productSku) ?: return
         val available = if (fromLocation.uppercase() == "SHOWROOM") currentProduct.showroomQty else currentProduct.godownQty
@@ -482,46 +490,7 @@ class AppRepository(private val appDao: AppDao) {
             "Insufficient stock for $productName at $fromLocation to transfer $quantity. Available: $available" 
         }
 
-        val transferCost = quantity * currentProduct.unitCost
-        val fromAccount = if (fromLocation.uppercase() == "SHOWROOM") "1100" else "1110"
-        val toAccount = if (toLocation.uppercase() == "SHOWROOM") "1100" else "1110"
-
-        val calendar = Calendar.getInstance()
-        val year = calendar.get(Calendar.YEAR)
-        val month = calendar.get(Calendar.MONTH) + 1
-
-        val jePrefix = "JE-${year}-${month.toString().padStart(2, '0')}"
-        val jeCount = appDao.countJournalEntriesInMonth(jePrefix)
-        val jeNum = (jeCount + 1).toString().padStart(5, '0')
-        val journalEntryNumber = "$jePrefix-$jeNum"
-
-        val journalEntry = JournalEntryEntity(
-            entryNumber = journalEntryNumber,
-            date = System.currentTimeMillis(),
-            description = "Stock Transfer: $quantity pcs $productName from $fromLocation to $toLocation",
-            refType = "TRANSFER"
-        )
-
-        val journalLines = listOf(
-            JournalLineEntity(
-                journalEntryId = 0,
-                accountCode = toAccount,
-                debit = transferCost,
-                credit = 0.0,
-                description = "Stock Transfer Dr integration value to $toLocation"
-            ),
-            JournalLineEntity(
-                journalEntryId = 0,
-                accountCode = fromAccount,
-                debit = 0.0,
-                credit = transferCost,
-                description = "Stock Transfer Cr integration value from $fromLocation"
-            )
-        )
-
-        appDao.insertGenericTransaction(journalEntry, journalLines)
-
-        // Apply physical stock adjustments in SQL products
+        // Apply physical stock adjustments ONLY — no journal entry for physical moves
         val fromShowroomDelta = if (fromLocation.uppercase() == "SHOWROOM") -quantity else 0
         val fromGodownDelta = if (fromLocation.uppercase() == "GODOWN") -quantity else 0
         val toShowroomDelta = if (toLocation.uppercase() == "SHOWROOM") quantity else 0
@@ -538,7 +507,7 @@ class AppRepository(private val appDao: AppDao) {
                 quantity = quantity,
                 fromLocation = fromLocation.uppercase(),
                 toLocation = toLocation.uppercase(),
-                reason = "Stock Transfer $journalEntryNumber"
+                reason = "Stock Transfer: $fromLocation → $toLocation"
             )
         )
     }
@@ -560,12 +529,9 @@ class AppRepository(private val appDao: AppDao) {
         val month = calendar.get(Calendar.MONTH) + 1
 
         val jePrefix = "JE-${year}-${month.toString().padStart(2, '0')}"
-        val jeCount = appDao.countJournalEntriesInMonth(jePrefix)
-        val jeNum = (jeCount + 1).toString().padStart(5, '0')
+        appDao.incrementSequence(jePrefix)
+        val jeNum = appDao.getNextSequence(jePrefix)?.toString()?.padStart(5, '0') ?: "00001"
         val journalEntryNumber = "$jePrefix-$jeNum"
-
-        val debitAccount = if (type == "IN") account else "5000"
-        val creditAccount = if (type == "IN") "5000" else account
 
         val journalEntry = JournalEntryEntity(
             entryNumber = journalEntryNumber,
@@ -575,10 +541,10 @@ class AppRepository(private val appDao: AppDao) {
         )
 
         val journalLines = if (type == "IN") {
-            // GAIN (Dr Inventory, Cr COGS reduction)
+            // GAIN (Dr Inventory, Cr Stock Adjustment equity — does NOT affect P&L)
             listOf(
                 JournalLineEntity(journalEntryId = 0, accountCode = account, debit = cost, credit = 0.0, description = "Stock Adjust GAIN Dr: $location"),
-                JournalLineEntity(journalEntryId = 0, accountCode = "5000", debit = 0.0, credit = cost, description = "COGS deduction adjustment Cr")
+                JournalLineEntity(journalEntryId = 0, accountCode = "3900", debit = 0.0, credit = cost, description = "Stock adjustment reserve Cr")
             )
         } else {
             // LOSS (Dr COGS expense, Cr Inventory reduction)
@@ -598,7 +564,7 @@ class AppRepository(private val appDao: AppDao) {
         } else 0
         val godownDelta = if (location.uppercase() == "GODOWN") {
             if (type == "IN") quantity else -quantity
-        } else 0
+        } else  0
 
         appDao.updateProductStock(productSku, showroomDelta, godownDelta)
 
@@ -614,5 +580,7 @@ class AppRepository(private val appDao: AppDao) {
                 reason = "Inventory Adjustment: $reason"
             )
         )
+
+        validateTrialBalance("Adjustment")
     }
 }
